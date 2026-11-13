@@ -60,7 +60,10 @@ int main(void) {
         assert([words isEqualToArray:(@[@"张三", @"李四", @"项目 X"])]);
 
         // 引擎封装
-        assert([AREngine configureKinds:@[@"phone", @"email", @"keyword"] keywords:@[@"张三"] error:NULL]);
+        // 数组字面量里的逗号会被 assert 宏当作参数分隔，先存到变量里。
+        NSArray *engineKinds = @[@"phone", @"email", @"keyword"];
+        BOOL configured = [AREngine configureKinds:engineKinds keywords:@[@"张三"] error:NULL];
+        assert(configured);
         NSArray *found = [AREngine findInLines:@[@"张三 13800138000", @"无"]];
         assert(found.count == 2 && [found[0] count] == 2 && [found[1] count] == 0);
         assert(NSEqualRanges([found[0][1][@"range"] rangeValue], NSMakeRange(3, 11)));
@@ -100,7 +103,9 @@ int main(void) {
         CVPixelBufferRelease(base);
 
         // 真实识别：合成画面中的手机号与邮箱
-        assert([AREngine configureKinds:@[@"phone", @"email"] keywords:@[] error:NULL]);
+        NSArray *visionKinds = @[@"phone", @"email"];
+        configured = [AREngine configureKinds:visionKinds keywords:@[] error:NULL];
+        assert(configured);
         CVPixelBufferRef screenshot = renderText(@"Phone 13800138000   Email zhang.san@example.com   Version 1.2.3", 1800, 240, 44);
         NSArray<ARDetection *> *detections = [[ARRecognizer new] detectionsInPixelBuffer:screenshot];
         NSCountedSet *kinds = [NSCountedSet set];
