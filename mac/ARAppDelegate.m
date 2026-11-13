@@ -249,7 +249,7 @@ static NSGridView *ARFormGrid(NSArray<NSArray<NSView *> *> *rows) {
         @[ARLabel(@"录制范围", 13, NO), ARRow(@[self.areaPopup, self.areaButton, self.areaLabel], 8)],
         @[ARLabel(@"识别频率", 13, NO), ARRow(@[self.rateSlider, self.rateLabel], 8)],
         @[NSGridCell.emptyContentView, ARRow(@[self.recommendLabel, self.useRecommendedButton], 8)],
-    ]];
+    ]);
     self.modeNote = ARNote(@"");
     return [self tab:@"常规" views:@[grid, self.modeNote] fill:@[self.modeNote]];
 }
@@ -328,7 +328,7 @@ static NSGridView *ARFormGrid(NSArray<NSArray<NSView *> *> *rows) {
         @[ARLabel(@"保存到", 13, NO), ARRow(@[self.folderLabel,
                                               [NSButton buttonWithTitle:@"更改…" target:self action:@selector(chooseFolder:)],
                                               [NSButton buttonWithTitle:@"在 Finder 中显示" target:self action:@selector(revealInFinder:)]], 8)],
-    ]];
+    ]);
     NSTextField *note = ARNote(@"录像会比实时画面晚约半秒写入：每一帧都等识别完成再打码，录出来的视频里每一帧都已遮住。"
                                @"系统声音不包含本 App；麦克风首次使用需要授权。这些设置只对录屏模式生效。");
     return [self tab:@"录屏与声音" views:@[grid, note] fill:@[note]];
@@ -338,7 +338,7 @@ static NSGridView *ARFormGrid(NSArray<NSArray<NSView *> *> *rows) {
     NSGridView *grid = ARFormGrid(@[
         @[ARLabel([ARHotkeys nameForAction:ARHotkeyActionRecord], 13, NO), ARLabel(@"开始 / 停止录屏", 13, NO)],
         @[ARLabel([ARHotkeys nameForAction:ARHotkeyActionOverlay], 13, NO), ARLabel(@"开始 / 停止屏幕遮挡", 13, NO)],
-    ]];
+    ]);
     self.hotkeyStatus = ARNote(@"");
     NSTextField *note = ARNote(@"App 在后台、窗口关闭时也能使用。开始录屏 / 遮挡时使用当前保存的设置。");
     return [self tab:@"快捷键" views:@[grid, note, self.hotkeyStatus] fill:@[note, self.hotkeyStatus]];
