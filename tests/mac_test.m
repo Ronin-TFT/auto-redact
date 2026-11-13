@@ -11,6 +11,7 @@
 #import "AREngine.h"
 #import "AROverlaySession.h"
 #import "ARRecognizer.h"
+#import "ARPerformance.h"
 #import "ARRedact.h"
 
 static BOOL near(CGFloat a, CGFloat b) { return fabs(a - b) < 0.5; }
@@ -57,6 +58,13 @@ int main(void) {
         CGRect wide = ARApproximateRangeBox(CGRectMake(0, 0, 1, 0.1), @"电话ab", NSMakeRange(2, 2));
         assert(near(wide.origin.x * 100, 50) && near(wide.size.width * 100, 50));
         assert(ARTextKey(@"13800138000") == ARTextKey(@"13800138000") && ARTextKey(@"a") != ARTextKey(@"b") && ARTextKey(@"") != 0);
+        // 推荐频率：识别最多占一半时间，限制在滑块范围内
+        assert(ARRecommendedRate(0.1, YES) == 5);
+        assert(ARRecommendedRate(0.04, YES) == 12);
+        assert(ARRecommendedRate(0.01, YES) == ARMaxRecognitionRate);
+        assert(ARRecommendedRate(2.0, NO) == ARMinRecognitionRate);
+        assert(ARRecommendedRate(0, YES) == 6 && ARRecommendedRate(0, NO) == 3);
+        assert(ARChipName().length > 0);
         NSArray *words = ARSplitKeywords(@" 张三，李四, 张三\n项目 X ");
         assert([words isEqualToArray:(@[@"张三", @"李四", @"项目 X"])]);
 

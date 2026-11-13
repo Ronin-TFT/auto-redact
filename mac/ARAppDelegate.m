@@ -3,6 +3,7 @@
 #import "AREngine.h"
 #import "ARLayout.h"
 #import "AROverlaySession.h"
+#import "ARPerformance.h"
 #import "ARRecognizer.h"
 #import "ARRecordSession.h"
 
@@ -42,7 +43,13 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
 @property (nonatomic, strong) NSDictionary<NSString *, NSButton *> *kindChecks;
 @property (nonatomic, strong) NSTextField *keywordsField;
 @property (nonatomic, strong) NSButton *chineseCheck;
-@property (nonatomic, strong) NSPopUpButton *ratePopup;
+@property (nonatomic, strong) NSSlider *rateSlider;
+@property (nonatomic, strong) NSTextField *rateLabel;
+@property (nonatomic, strong) NSTextField *recommendLabel;
+@property (nonatomic, strong) NSButton *useRecommendedButton;
+@property (nonatomic) NSInteger recommendedRate;
+/// 每次开始测速递增，丢弃过时的测速结果（切换“识别中文”时会重新测）。
+@property (nonatomic) NSUInteger measureGeneration;
 @property (nonatomic, strong) NSPopUpButton *stylePopup;
 @property (nonatomic, strong) NSPopUpButton *qualityPopup;
 @property (nonatomic, strong) NSPopUpButton *fpsPopup;
@@ -84,6 +91,7 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
     [self loadSettings];
     [self buildStatusItem];
     [self updateControls];
+    [self measureRecognitionSpeed];
     [self showMainWindow:nil];
     if (!CGPreflightScreenCaptureAccess()) {
         [self setStatus:@"首次使用需要屏幕录制权限：点“检查当前屏幕”后按提示在系统设置中允许，然后重新打开 App"];
@@ -160,9 +168,20 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
 
     self.keywordsField = [NSTextField textFieldWithString:@""];
     self.keywordsField.placeholderString = @"自定义关键词，用逗号分隔，例如：张三, 公司内部项目名";
-    self.chineseCheck = [NSButton checkboxWithTitle:@"识别中文（中文关键词需要；更慢，建议识别频率选 3 次/秒）" target:self action:@selector(settingChanged:)];
-    self.ratePopup = [self popup:@[@"每秒 3 次", @"每秒 5 次", @"每秒 8 次"] tags:@[@3, @5, @8]];
-    [self.ratePopup selectItemWithTag:5];
+    self.chineseCheck = [NSButton checkboxWithTitle:@"识别中文（中文关键词需要；识别更慢，推荐频率会随之降低）" target:self action:@selector(chineseChanged:)];
+    self.rateSlider = [NSSlider sliderWithValue:5 minValue:ARMinRecognitionRate maxValue:ARMaxRecognitionRate
+                                         target:self action:@selector(rateChanged:)];
+    self.rateSlider.numberOfTickMarks = ARMaxRecognitionRate - ARMinRecognitionRate + 1;
+    self.rateSlider.allowsTickMarkValuesOnly = YES;
+    [self.rateSlider.widthAnchor constraintEqualToConstant:200].active = YES;
+    self.rateLabel = ARLabel(@"", 13, NO);
+    self.rateLabel.font = [NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightRegular];
+    [self.rateLabel.widthAnchor constraintGreaterThanOrEqualToConstant:76].active = YES;
+    self.recommendLabel = ARLabel(@"正在测试本机识别速度…", 12, NO);
+    self.recommendLabel.textColor = NSColor.secondaryLabelColor;
+    self.useRecommendedButton = [NSButton buttonWithTitle:@"使用推荐值" target:self action:@selector(useRecommendedRate:)];
+    self.useRecommendedButton.controlSize = NSControlSizeSmall;
+    self.useRecommendedButton.enabled = NO;
 
     self.stylePopup = [self popup:@[@"马赛克", @"模糊", @"色块"] tags:@[@0, @1, @2]];
     self.qualityPopup = [self popup:@[@"1080p（推荐）", @"原始分辨率"] tags:@[@1920, @0]];
@@ -198,7 +217,8 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
     NSGridView *topGrid = [NSGridView gridViewWithViews:@[
         @[ARLabel(@"模式", 13, NO), self.modePopup],
         @[ARLabel(@"屏幕", 13, NO), self.screenPopup],
-        @[ARLabel(@"识别频率", 13, NO), self.ratePopup],
+        @[ARLabel(@"识别频率", 13, NO), ARRow(@[self.rateSlider, self.rateLabel], 8)],
+        @[NSGridCell.emptyContentView, ARRow(@[self.recommendLabel, self.useRecommendedButton], 8)],
     ]];
     topGrid.rowSpacing = 8;
     topGrid.columnSpacing = 12;
@@ -264,11 +284,12 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
     self.recordOptions.hidden = overlay;
     self.overlayNote.hidden = !overlay;
     self.folderLabel.stringValue = self.folderURL.path;
-    NSMutableArray<NSControl *> *controls = [NSMutableArray arrayWithArray:@[self.modePopup, self.screenPopup, self.ratePopup,
+    NSMutableArray<NSControl *> *controls = [NSMutableArray arrayWithArray:@[self.modePopup, self.screenPopup, self.rateSlider,
                                                                              self.keywordsField, self.chineseCheck, self.stylePopup,
                                                                              self.qualityPopup, self.fpsPopup, self.cursorCheck]];
     [controls addObjectsFromArray:self.kindChecks.allValues];
     for (NSControl *control in controls) control.enabled = !running && !self.busy;
+    [self updateRateLabel];
     NSImage *image = [NSImage imageWithSystemSymbolName:running ? @"eye.slash.fill" : @"eye.slash" accessibilityDescription:@"自动打码"];
     if (image) {
         image.template = YES;
@@ -278,6 +299,58 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
 
 - (void)setStatus:(NSString *)text {
     self.statusField.stringValue = text;
+}
+
+#pragma mark - 识别频率
+
+- (void)updateRateLabel {
+    NSInteger rate = self.rateSlider.integerValue;
+    self.rateLabel.stringValue = [NSString stringWithFormat:@"每秒 %ld 次", (long)rate];
+    self.useRecommendedButton.enabled = self.recommendedRate > 0 && rate != self.recommendedRate && !self.isRunning;
+}
+
+- (void)rateChanged:(id)sender {
+    [self updateRateLabel];
+    [self saveSettings];
+}
+
+- (void)useRecommendedRate:(id)sender {
+    if (self.recommendedRate <= 0) return;
+    self.rateSlider.integerValue = self.recommendedRate;
+    [self rateChanged:nil];
+}
+
+- (void)chineseChanged:(id)sender {
+    [self settingChanged:sender];
+    [self measureRecognitionSpeed];
+}
+
+/// 实测本机识别一帧的耗时，给出推荐频率。
+- (void)measureRecognitionSpeed {
+    NSUInteger generation = ++self.measureGeneration;
+    BOOL chinese = self.chineseCheck.state == NSControlStateValueOn;
+    BOOL appleSilicon = ARIsAppleSilicon();
+    NSString *chip = ARChipName();
+    self.recommendedRate = ARRecommendedRate(0, appleSilicon);
+    self.recommendLabel.stringValue = [NSString stringWithFormat:@"正在测试本机识别速度…（%@）", chip];
+    [self updateRateLabel];
+    ARMeasureRecognition(chinese, ^(double seconds) {
+        if (generation != self.measureGeneration) return;
+        self.recommendedRate = ARRecommendedRate(seconds, appleSilicon);
+        if (seconds > 0) {
+            self.recommendLabel.stringValue = [NSString stringWithFormat:@"推荐：每秒 %ld 次（%@ · %@识别一帧约 %.0f 毫秒）",
+                                               (long)self.recommendedRate, chip, chinese ? @"含中文" : @"",
+                                               seconds * 1000];
+        } else {
+            self.recommendLabel.stringValue = [NSString stringWithFormat:@"推荐：每秒 %ld 次（%@）", (long)self.recommendedRate, chip];
+        }
+        // 第一次使用（没有保存过频率）时直接采用推荐值。
+        if (![NSUserDefaults.standardUserDefaults objectForKey:@"rate"]) {
+            self.rateSlider.integerValue = self.recommendedRate;
+            [self saveSettings];
+        }
+        [self updateRateLabel];
+    });
 }
 
 - (void)settingChanged:(id)sender {
@@ -297,7 +370,8 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
     }
     self.keywordsField.stringValue = [d stringForKey:@"keywords"] ?: @"";
     self.chineseCheck.state = [d boolForKey:@"chinese"] ? NSControlStateValueOn : NSControlStateValueOff;
-    if ([d objectForKey:@"rate"]) [self.ratePopup selectItemWithTag:[d integerForKey:@"rate"]];
+    if ([d objectForKey:@"rate"]) self.rateSlider.integerValue = MIN(MAX([d integerForKey:@"rate"], ARMinRecognitionRate), ARMaxRecognitionRate);
+    [self updateRateLabel];
     if ([d objectForKey:@"style"]) [self.stylePopup selectItemWithTag:[d integerForKey:@"style"]];
     if ([d objectForKey:@"quality"]) [self.qualityPopup selectItemWithTag:[d integerForKey:@"quality"]];
     if ([d objectForKey:@"fps"]) [self.fpsPopup selectItemWithTag:[d integerForKey:@"fps"]];
@@ -313,7 +387,7 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
     [d setObject:[self selectedKinds] forKey:@"kinds"];
     [d setObject:self.keywordsField.stringValue forKey:@"keywords"];
     [d setBool:self.chineseCheck.state == NSControlStateValueOn forKey:@"chinese"];
-    [d setInteger:self.ratePopup.selectedTag forKey:@"rate"];
+    [d setInteger:self.rateSlider.integerValue forKey:@"rate"];
     [d setInteger:self.stylePopup.selectedTag forKey:@"style"];
     [d setInteger:self.qualityPopup.selectedTag forKey:@"quality"];
     [d setInteger:self.fpsPopup.selectedTag forKey:@"fps"];
@@ -382,7 +456,7 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
     }
     if (![self ensurePermission] || ![self applyDetectionSettings]) return;
     NSScreen *screen = [self selectedScreen];
-    double rate = (double)self.ratePopup.selectedTag;
+    double rate = (double)self.rateSlider.integerValue;
     BOOL chinese = self.chineseCheck.state == NSControlStateValueOn;
     self.busy = YES;
     [self updateControls];
