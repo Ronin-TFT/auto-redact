@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  engine:
+    name: Engine (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: C bridge test
+        run: |
+          mkdir -p build
+          go build -buildmode=c-archive -o build/libredact.a .
+          cc -Wall -Werror -I build tests/bridge_test.c build/libredact.a -lpthread -o build/bridge-test
+          build/bridge-test
+
+  macos:
+    name: Mac app
+    # macOS 运行器按更高倍率计费，只在 Actions 页面手动触发时运行。
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Native tests
+        run: |
+          mkdir -p build
+          go build -buildmode=c-archive -o build/libredact.a .
+          clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) build/libredact.a \
+            -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
+            -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test
+          build/mac-test
+      - run: ./build_dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoRedact-dmg
+          path: dist/AutoRedact.dmg
