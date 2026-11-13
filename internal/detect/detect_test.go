@@ -115,3 +115,11 @@ func BenchmarkFind(b *testing.B) {
 		d.Find(line)
 	}
 }
+
+// 只选了二维码 / 人脸时，界面传 kinds=["keyword"] 且没有关键词：不应匹配任何文字。
+func TestKeywordOnlyWithoutWordsMatchesNothing(t *testing.T) {
+	d := New(Config{Kinds: []string{KindKeyword}})
+	if got := d.Find("手机 13800138000 邮箱 a@b.com"); len(got) != 0 {
+		t.Fatalf("expected no matches, got %v", got)
+	}
+}

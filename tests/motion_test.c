@@ -293,6 +293,42 @@ int main(void) {
         printf("%s %-36s 已识别过的内容漏遮 %d 帧次\n", r.predictionMisses == 0 ? "✅" : "❌", live[i].name, r.predictionMisses);
         failed += r.predictionMisses != 0;
     }
+    // 变化区域：画面不变时没有；新出现一项时，外接矩形覆盖它且远小于整个画面。
+    {
+        ARMotionSession *m = ARMotionCreate(W, H, 2, 4, 0.6);
+        Scene scene = makeScene();
+        uint8_t *frame = malloc((size_t)W * H * 4);
+        render(frame, scene.list, scene.items);
+        long a = ARMotionAddFrame(m, frame, W * 4, 0);
+        long b = ARMotionAddFrame(m, frame, W * 4, 0.1);
+        ARBox changed;
+        int none = !ARMotionChangedRegion(m, a, b, &changed);
+        Item extra = {600, 300, 200, 22, 4242, 1, 0};
+        scene.list[scene.items++] = extra;
+        render(frame, scene.list, scene.items);
+        long c = ARMotionAddFrame(m, frame, W * 4, 0.2);
+        int found = ARMotionChangedRegion(m, b, c, &changed);
+        int ok = none && found && changed.x <= 600 && changed.y <= 300 && changed.x + changed.w >= 800 &&
+                 changed.y + changed.h >= 322 && changed.w * changed.h < W * H * 0.2;
+        printf("%s 变化区域检测：静止时%s，新内容区域 %.0f×%.0f\n", ok ? "✅" : "❌", none ? "无变化" : "误报",
+               found ? changed.w : 0, found ? changed.h : 0);
+        failed += !ok;
+        ARBox region;
+        int plans = ARMotionPlanRecognition(m, -1, c, 0, 1, 32, &region) == ARRecognizeFull &&
+                    ARMotionPlanRecognition(m, a, b, 0.2, 1, 32, &region) == ARRecognizeNone &&
+                    ARMotionPlanRecognition(m, b, c, 0.2, 1, 32, &region) == ARRecognizeRegion &&
+                    region.x <= 568 && region.y <= 268 && region.x + region.w >= 832 && region.y + region.h >= 354 &&
+                    ARMotionPlanRecognition(m, b, c, 1.5, 1, 32, &region) == ARRecognizeFull &&
+                    ARMotionPlanRecognition(m, 999, c, 0.2, 1, 32, &region) == ARRecognizeFull;
+        printf("%s 识别计划：首次整屏、无变化跳过、只识别变化区域、定期整屏兜底\n", plans ? "✅" : "❌");
+        failed += !plans;
+        int factorsOk = ARMotionFactorForWidth(960) == 1 && ARMotionFactorForWidth(1920) == 2 && ARMotionFactorForWidth(3024) == 3 &&
+                        ARMotionFactorForWidth(5120) == 4;
+        printf("%s 追踪缩小倍数按宽度选择\n", factorsOk ? "✅" : "❌");
+        failed += !factorsOk;
+        free(frame);
+        ARMotionDestroy(m);
+    }
     printf(failed ? "\n%d failed\n" : "\nall passed\n", failed);
     return failed ? 1 : 0;
 }

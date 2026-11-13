@@ -3,13 +3,18 @@
 //   go build -buildmode=c-archive -o build/libredact.a .
 //   clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) mac/ARMotion.c build/libredact.a \
 //     -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
-//     -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test && build/mac-test
+//     -framework CoreImage -framework Vision -framework CoreFoundation -framework AVKit -framework Carbon -o build/mac-test && build/mac-test
 #import <Cocoa/Cocoa.h>
 #include <assert.h>
 #import "ARAppDelegate.h"
 #import "ARCapture.h"
 #import "AREngine.h"
 #import "AROverlaySession.h"
+#import "ARHotkeys.h"
+#import "ARPatchExporter.h"
+#import "ARPrivacyWindows.h"
+#import "ARRecordSession.h"
+#import "ARReviewController.h"
 #import "ARRecognizer.h"
 #import "ARPerformance.h"
 #import "ARRedact.h"
@@ -67,6 +72,36 @@ int main(void) {
         assert(ARChipName().length > 0);
         NSArray *words = ARSplitKeywords(@" 张三，李四, 张三\n项目 X ");
         assert([words isEqualToArray:(@[@"张三", @"李四", @"项目 X"])]);
+
+        // 0.2：录制区域、识别区域、复查、隐私窗口的坐标换算
+        // 屏幕 (1440,0,1000,500) 中，全局 (1540,400,200,50) 距屏幕顶部 50 点。
+        CGRect local = ARDisplayLocalRect(CGRectMake(1540, 400, 200, 50), CGRectMake(1440, 0, 1000, 500));
+        assert(near(local.origin.x, 100) && near(local.origin.y, 50) && near(local.size.width, 200) && near(local.size.height, 50));
+        CGRect clipped = ARDisplayLocalRect(CGRectMake(1400, 450, 100, 100), CGRectMake(1440, 0, 1000, 500));
+        assert(near(clipped.origin.x, 0) && near(clipped.origin.y, 0) && near(clipped.size.width, 60) && near(clipped.size.height, 50));
+        assert(CGRectIsNull(ARDisplayLocalRect(CGRectMake(0, 0, 100, 100), CGRectMake(1440, 0, 1000, 500))));
+        // 录制区域 (100,50,800,400) 点，捕获 1600×800 像素：区域内 (200,100,100,50) → (200,100,200,100) 像素。
+        NSRect inCapture = ARCapturePixelRect(CGRectMake(200, 100, 100, 50), CGRectMake(100, 50, 800, 400), CGSizeMake(1600, 800));
+        assert(near(inCapture.origin.x, 200) && near(inCapture.origin.y, 100) && near(inCapture.size.width, 200) && near(inCapture.size.height, 100));
+        CGRect roi = ARNormalizedFromPixelRect(NSMakeRect(100, 0, 500, 100), 1000, 400);
+        assert(near(roi.origin.x * 100, 10) && near(roi.origin.y * 100, 75) && near(roi.size.width * 100, 50) && near(roi.size.height * 100, 25));
+        CGRect inFull = ARNormalizedInROI(CGRectMake(0.5, 0.5, 0.5, 0.5), roi);
+        assert(near(inFull.origin.x * 100, 35) && near(inFull.origin.y * 1000, 875) && near(inFull.size.width * 100, 25));
+        NSRect back = ARPixelRectFromNormalized(inFull, 1000, 400);
+        assert(near(back.origin.x, 350) && near(back.origin.y, 0) && near(back.size.width, 250) && near(back.size.height, 50));
+        // 画面在视图中位于 (0,50,800,450)，录像 1600×900：视图 (100,400,200,100) → 录像 (200,0,400,200)。
+        NSRect video = ARVideoRectFromViewRect(NSMakeRect(100, 400, 200, 100), NSMakeRect(0, 50, 800, 450), CGSizeMake(1600, 900));
+        assert(near(video.origin.x, 200) && near(video.origin.y, 0) && near(video.size.width, 400) && near(video.size.height, 200));
+        assert(NSIsEmptyRect(ARVideoRectFromViewRect(NSMakeRect(0, 0, 10, 10), NSMakeRect(0, 50, 800, 450), CGSizeMake(1600, 900))));
+        NSArray *masks = @[[[ARManualMask alloc] initWithRect:NSMakeRect(0, 0, 10, 10) start:1 end:2],
+                           [[ARManualMask alloc] initWithRect:NSMakeRect(5, 5, 10, 10) start:1.5 end:3]];
+        assert(ARMasksAtTime(masks, 0.5).count == 0 && ARMasksAtTime(masks, 1.0).count == 1);
+        assert(ARMasksAtTime(masks, 1.75).count == 2 && ARMasksAtTime(masks, 2.5).count == 1 && ARMasksAtTime(masks, 3.1).count == 0);
+        NSRect cocoa = ARCocoaRectFromWindowBounds(CGRectMake(10, 20, 300, 200), 900);
+        assert(near(cocoa.origin.x, 10) && near(cocoa.origin.y, 680) && near(cocoa.size.width, 300) && near(cocoa.size.height, 200));
+        assert([[ARHotkeys nameForAction:ARHotkeyActionRecord] isEqualToString:@"⌃⌥⌘R"]);
+        assert([[ARHotkeys nameForAction:ARHotkeyActionOverlay] isEqualToString:@"⌃⌥⌘H"]);
+        assert(ARNotificationCenterBundleID.length > 0);
 
         // 引擎封装
         // 数组字面量里的逗号会被 assert 宏当作参数分隔，先存到变量里。
@@ -129,7 +164,32 @@ int main(void) {
         assert(phone.rect.origin.x > 100);
         CVPixelBufferRelease(screenshot);
 
-        puts("geometry, engine, redaction rendering and Vision recognition passed");
+        // 二维码：用 CoreImage 生成后识别
+        CIFilter *qr = [CIFilter filterWithName:@"CIQRCodeGenerator"];
+        [qr setValue:[@"https://example.com/secret-invite" dataUsingEncoding:NSUTF8StringEncoding] forKey:@"inputMessage"];
+        CIImage *code = [qr.outputImage imageByApplyingTransform:CGAffineTransformMakeScale(10, 10)];
+        code = [code imageByApplyingTransform:CGAffineTransformMakeTranslation(300, 100)];
+        CIImage *canvas = [[CIImage imageWithColor:[CIColor whiteColor]] imageByCroppingToRect:CGRectMake(0, 0, 1000, 500)];
+        CVPixelBufferRef qrBuffer = NULL;
+        CVPixelBufferCreate(kCFAllocatorDefault, 1000, 500, kCVPixelFormatType_32BGRA,
+                            (__bridge CFDictionaryRef)@{(id)kCVPixelBufferIOSurfacePropertiesKey: @{}}, &qrBuffer);
+        [context render:[code imageByCompositingOverImage:canvas] toCVPixelBuffer:qrBuffer];
+        ARRecognizer *codeRecognizer = [ARRecognizer new];
+        codeRecognizer.detectsCodes = YES;
+        NSArray<ARDetection *> *codes = [codeRecognizer detectionsInPixelBuffer:qrBuffer];
+        BOOL foundCode = NO;
+        for (ARDetection *d in codes) {
+            if (![d.kind isEqualToString:@"qrcode"]) continue;
+            foundCode = YES;
+            assert(d.rect.size.width > 100 && d.rect.origin.x > 250 && NSMaxX(d.rect) < 760);
+        }
+        assert(foundCode);
+        // 只识别最右边一块（二维码在 300~700 列之间）：这块区域里没有二维码。
+        NSArray<ARDetection *> *rightOnly = [codeRecognizer detectionsInPixelBuffer:qrBuffer region:NSMakeRect(780, 0, 220, 500)];
+        for (ARDetection *d in rightOnly) assert(![d.kind isEqualToString:@"qrcode"]);
+        CVPixelBufferRelease(qrBuffer);
+
+        puts("geometry, engine, redaction rendering, Vision text and QR code recognition passed");
     }
     return 0;
 }

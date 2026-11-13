@@ -49,22 +49,57 @@ uint32_t ARTextKey(NSString *text) {
 }
 @end
 
+CGRect ARNormalizedFromPixelRect(NSRect r, size_t width, size_t height) {
+    CGRect n = CGRectMake(r.origin.x / width, 1.0 - (r.origin.y + r.size.height) / height, r.size.width / width, r.size.height / height);
+    return CGRectIntersection(n, CGRectMake(0, 0, 1, 1));
+}
+
+CGRect ARNormalizedInROI(CGRect result, CGRect roi) {
+    return CGRectMake(roi.origin.x + result.origin.x * roi.size.width, roi.origin.y + result.origin.y * roi.size.height,
+                      result.size.width * roi.size.width, result.size.height * roi.size.height);
+}
+
 @implementation ARRecognizer
 
 - (NSArray<ARDetection *> *)detectionsInPixelBuffer:(CVPixelBufferRef)buffer {
+    return [self detectionsInPixelBuffer:buffer region:NSZeroRect];
+}
+
+- (NSArray<ARDetection *> *)detectionsInPixelBuffer:(CVPixelBufferRef)buffer region:(NSRect)region {
     @autoreleasepool {
+        size_t width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer);
+        CGRect roi = NSIsEmptyRect(region) ? CGRectMake(0, 0, 1, 1) : ARNormalizedFromPixelRect(region, width, height);
+        if (CGRectIsEmpty(roi)) return @[];
+
         VNRecognizeTextRequest *request = [VNRecognizeTextRequest new];
         request.usesLanguageCorrection = NO;
         // 默认会忽略高度小于画面 1/32 的文字（1080p 下约 34 像素，比普通正文还大），小字因此时有时无。
         request.minimumTextHeight = 0;
+        request.regionOfInterest = roi;
         if (self.recognizesChinese) {
             request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
             request.recognitionLanguages = @[@"zh-Hans", @"en-US"];
         } else {
             request.recognitionLevel = VNRequestTextRecognitionLevelFast;
         }
+        NSMutableArray<VNRequest *> *requests = [NSMutableArray arrayWithObject:request];
+        VNDetectBarcodesRequest *codes = nil;
+        if (self.detectsCodes) {
+            codes = [VNDetectBarcodesRequest new];
+            codes.regionOfInterest = roi;
+            [requests addObject:codes];
+        }
+        VNDetectFaceRectanglesRequest *faces = nil;
+        if (self.detectsFaces) {
+            faces = [VNDetectFaceRectanglesRequest new];
+            faces.regionOfInterest = roi;
+            [requests addObject:faces];
+        }
         VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:buffer options:@{}];
-        if (![handler performRequests:@[request] error:NULL]) return @[];
+        if (![handler performRequests:requests error:NULL]) return @[];
+
+        // 设置了识别区域时，结果坐标相对于该区域，需换算回整幅画面。
+        CGRect (^full)(CGRect) = ^CGRect(CGRect r) { return ARNormalizedInROI(r, roi); };
 
         NSMutableArray<VNRecognizedText *> *texts = [NSMutableArray array];
         NSMutableArray<VNRecognizedTextObservation *> *observations = [NSMutableArray array];
@@ -77,7 +112,6 @@ uint32_t ARTextKey(NSString *text) {
             [lines addObject:top.string];
         }
         NSArray<NSArray<NSDictionary *> *> *found = [AREngine findInLines:lines];
-        size_t width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer);
         NSMutableArray<ARDetection *> *out = [NSMutableArray array];
         for (NSUInteger i = 0; i < found.count && i < texts.count; i++) {
             for (NSDictionary *match in found[i]) {
@@ -90,10 +124,21 @@ uint32_t ARTextKey(NSString *text) {
                 if (range.length < texts[i].string.length * 0.8 && normalized.size.width >= line.size.width * 0.95) {
                     normalized = ARApproximateRangeBox(line, texts[i].string, range);
                 }
-                [out addObject:[[ARDetection alloc] initWithRect:ARPixelRectFromNormalized(normalized, width, height)
+                [out addObject:[[ARDetection alloc] initWithRect:ARPixelRectFromNormalized(full(normalized), width, height)
                                                             kind:match[@"kind"]
                                                              key:ARTextKey([texts[i].string substringWithRange:range])]];
             }
+        }
+        for (VNBarcodeObservation *code in codes.results ?: @[]) {
+            NSString *payload = code.payloadStringValue ?: @"";
+            [out addObject:[[ARDetection alloc] initWithRect:ARPixelRectFromNormalized(full(code.boundingBox), width, height)
+                                                        kind:@"qrcode"
+                                                         key:ARTextKey([@"code:" stringByAppendingString:payload])]];
+        }
+        for (VNFaceObservation *face in faces.results ?: @[]) {
+            // 人脸框只包住五官，向外扩大一些盖住头发和下巴。
+            NSRect r = ARPixelRectFromNormalized(full(face.boundingBox), width, height);
+            [out addObject:[[ARDetection alloc] initWithRect:NSInsetRect(r, -r.size.width * 0.2, -r.size.height * 0.3) kind:@"face" key:0]];
         }
         return out;
     }

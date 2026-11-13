@@ -460,6 +460,61 @@ int ARMotionPredictedBoxes(const ARMotionSession *s, double framesAhead, ARBox *
     return n;
 }
 
+int ARMotionFactorForWidth(int width) {
+    int f = (int)lround(width / 960.0);
+    return f < 1 ? 1 : (f > 4 ? 4 : f);
+}
+
+int ARMotionChangedRegion(const ARMotionSession *s, long fromId, long toId, ARBox *out) {
+    const ARFrame *a = findFrame(s, fromId), *b = findFrame(s, toId);
+    if (!a || !b || a == b) return 0;
+    enum { BLOCK = 16 };
+    int minX = s->gw, minY = s->gh, maxX = -1, maxY = -1;
+    for (int by = 0; by < s->gh; by += BLOCK) {
+        int y1 = by + BLOCK < s->gh ? by + BLOCK : s->gh;
+        for (int bx = 0; bx < s->gw; bx += BLOCK) {
+            int x1 = bx + BLOCK < s->gw ? bx + BLOCK : s->gw;
+            long sum = 0, n = 0;
+            for (int y = by; y < y1; y += 2) {
+                const uint8_t *pa = a->gray + (size_t)y * s->gw, *pb = b->gray + (size_t)y * s->gw;
+                for (int x = bx; x < x1; x += 2) {
+                    int d = (int)pa[x] - (int)pb[x];
+                    sum += d < 0 ? -d : d;
+                    n++;
+                }
+            }
+            // 平均差超过 4 视为有变化（忽略压缩噪声和细微抗锯齿差异）。
+            if (n && sum > 4 * n) {
+                if (bx < minX) minX = bx;
+                if (by < minY) minY = by;
+                if (x1 > maxX) maxX = x1;
+                if (y1 > maxY) maxY = y1;
+            }
+        }
+    }
+    if (maxX < 0) return 0;
+    int f = s->factor;
+    ARBox r = {(double)minX * f, (double)minY * f, (double)(maxX - minX) * f, (double)(maxY - minY) * f};
+    *out = r;
+    return 1;
+}
+
+ARRecognizePlan ARMotionPlanRecognition(const ARMotionSession *s, long lastRecognizedFrame, long currentFrame,
+                                        double secondsSinceFull, double fullInterval, double margin, ARBox *region) {
+    if (lastRecognizedFrame < 0 || secondsSinceFull >= fullInterval) return ARRecognizeFull;
+    ARBox changed;
+    if (!ARMotionChangedRegion(s, lastRecognizedFrame, currentFrame, &changed)) {
+        // 上次识别的那一帧已释放时无法比较，保守起见识别整屏。
+        return findFrame(s, lastRecognizedFrame) ? ARRecognizeNone : ARRecognizeFull;
+    }
+    double x0 = fmax(0, changed.x - margin), y0 = fmax(0, changed.y - margin);
+    double x1 = fmin(s->width, changed.x + changed.w + margin), y1 = fmin(s->height, changed.y + changed.h + margin);
+    ARBox r = {x0, y0, x1 - x0, y1 - y0};
+    if (r.w * r.h > 0.6 * s->width * s->height) return ARRecognizeFull;
+    *region = r;
+    return ARRecognizeRegion;
+}
+
 void ARMotionRelease(ARMotionSession *s, long frameId) {
     int drop = 0;
     while (drop < s->nframes - 1 && s->frames[drop].id < frameId) {

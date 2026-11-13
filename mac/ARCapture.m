@@ -18,11 +18,32 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
     return CGSizeMake(MAX(pw, 2), MAX(ph, 2));
 }
 
+CGRect ARDisplayLocalRect(CGRect globalRect, CGRect screenFrame) {
+    CGRect r = CGRectIntersection(CGRectStandardize(globalRect), screenFrame);
+    if (CGRectIsNull(r) || CGRectIsEmpty(r)) return CGRectNull;
+    return CGRectMake(r.origin.x - screenFrame.origin.x, CGRectGetMaxY(screenFrame) - CGRectGetMaxY(r), r.size.width, r.size.height);
+}
+
+@implementation ARCaptureOptions
+- (instancetype)init {
+    if ((self = [super init])) {
+        _fps = 30;
+        _sourceRect = CGRectNull;
+        _excludedBundleIDs = @[];
+    }
+    return self;
+}
+@end
+
 @interface ARCapture () <SCStreamOutput, SCStreamDelegate>
 @property (nonatomic, readwrite) CGSize pixelSize;
+@property (nonatomic, readwrite) CGRect sourceRect;
 @property (nonatomic, readwrite) dispatch_queue_t frameQueue;
+@property (nonatomic, strong) dispatch_queue_t audioQueue;
 @property (nonatomic, strong, nullable) SCStream *stream;
+@property (nonatomic, strong, nullable) SCDisplay *display;
 @property (nonatomic, copy, nullable) void (^frameHandler)(CMSampleBufferRef, CVPixelBufferRef, double);
+@property (nonatomic, copy, nullable) void (^audioHandler)(CMSampleBufferRef);
 @end
 
 @implementation ARCapture
@@ -30,14 +51,25 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
 - (instancetype)init {
     if ((self = [super init])) {
         _frameQueue = dispatch_queue_create("AutoRedact.Frames", DISPATCH_QUEUE_SERIAL);
+        _audioQueue = dispatch_queue_create("AutoRedact.Audio", DISPATCH_QUEUE_SERIAL);
+        _sourceRect = CGRectNull;
     }
     return self;
 }
 
-- (void)startDisplay:(CGDirectDisplayID)displayID maxWidth:(NSInteger)maxWidth fps:(NSInteger)fps showsCursor:(BOOL)showsCursor
-             prepare:(BOOL (^)(CGSize, NSError **))prepare
-        frameHandler:(void (^)(CMSampleBufferRef, CVPixelBufferRef, double))frameHandler
-          completion:(void (^)(NSError *))completion {
+/// 本 App 与指定 Bundle ID 的 App。
+static NSArray<SCRunningApplication *> *ARExcludedApps(SCShareableContent *content, NSArray<NSString *> *bundleIDs) {
+    NSMutableArray<SCRunningApplication *> *apps = [NSMutableArray array];
+    for (SCRunningApplication *app in content.applications) {
+        if (app.processID == getpid() || [bundleIDs containsObject:app.bundleIdentifier ?: @""]) [apps addObject:app];
+    }
+    return apps;
+}
+
+- (void)startWithOptions:(ARCaptureOptions *)options prepare:(BOOL (^)(CGSize, NSError **))prepare
+            frameHandler:(void (^)(CMSampleBufferRef, CVPixelBufferRef, double))frameHandler
+            audioHandler:(void (^)(CMSampleBufferRef))audioHandler
+              completion:(void (^)(NSError *))completion {
     if (self.stream) {
         completion(ARCaptureError(@"已经在运行"));
         return;
@@ -51,7 +83,7 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
             }
             SCDisplay *display = nil;
             for (SCDisplay *candidate in content.displays) {
-                if (candidate.displayID == displayID) display = candidate;
+                if (candidate.displayID == options.displayID) display = candidate;
             }
             if (!display) {
                 completion(ARCaptureError(@"找不到这块屏幕，请重新选择"));
@@ -59,26 +91,37 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
             }
             CGFloat scale = 1;
             for (NSScreen *screen in NSScreen.screens) {
-                if ([screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == displayID) scale = screen.backingScaleFactor;
+                if ([screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == options.displayID) scale = screen.backingScaleFactor;
             }
-            NSMutableArray<SCRunningApplication *> *excluded = [NSMutableArray array];
-            for (SCRunningApplication *app in content.applications) {
-                if (app.processID == getpid()) [excluded addObject:app];
+            CGRect full = CGRectMake(0, 0, display.width, display.height);
+            CGRect source = CGRectIsNull(options.sourceRect) ? full : CGRectIntersection(CGRectIntegral(options.sourceRect), full);
+            if (CGRectIsNull(source) || source.size.width < 16 || source.size.height < 16) {
+                completion(ARCaptureError(@"录制区域太小或不在这块屏幕上，请重新选择"));
+                return;
             }
-            SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingApplications:excluded exceptingWindows:@[]];
-            CGSize size = ARCaptureSize(CGSizeMake(display.width, display.height), scale, maxWidth);
+            SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display
+                                                         excludingApplications:ARExcludedApps(content, options.excludedBundleIDs)
+                                                              exceptingWindows:@[]];
+            CGSize size = ARCaptureSize(source.size, scale, options.maxWidth);
             NSError *prepareError = nil;
             if (!prepare(size, &prepareError)) {
                 completion(prepareError ?: ARCaptureError(@"无法准备录制"));
                 return;
             }
             SCStreamConfiguration *config = [SCStreamConfiguration new];
+            if (!CGRectEqualToRect(source, full)) config.sourceRect = source;
             config.width = (size_t)size.width;
             config.height = (size_t)size.height;
-            config.minimumFrameInterval = CMTimeMake(1, (int32_t)MAX(fps, 1));
-            config.showsCursor = showsCursor;
+            config.minimumFrameInterval = CMTimeMake(1, (int32_t)MAX(options.fps, 1));
+            config.showsCursor = options.showsCursor;
             config.pixelFormat = kCVPixelFormatType_32BGRA;
             config.queueDepth = 8;
+            if (audioHandler && options.capturesSystemAudio) {
+                config.capturesAudio = YES;
+                config.excludesCurrentProcessAudio = YES;
+                config.sampleRate = 48000;
+                config.channelCount = 2;
+            }
 
             SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
             NSError *outputError = nil;
@@ -86,14 +129,23 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
                 completion(outputError ?: ARCaptureError(@"无法接收屏幕画面"));
                 return;
             }
+            if (config.capturesAudio &&
+                ![stream addStreamOutput:self type:SCStreamOutputTypeAudio sampleHandlerQueue:self.audioQueue error:&outputError]) {
+                completion(outputError ?: ARCaptureError(@"无法接收系统声音"));
+                return;
+            }
             self.pixelSize = size;
+            self.sourceRect = source;
             self.frameHandler = frameHandler;
+            self.audioHandler = config.capturesAudio ? audioHandler : nil;
+            self.display = display;
             self.stream = stream;
             [stream startCaptureWithCompletionHandler:^(NSError *startError) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (startError) {
                         self.stream = nil;
                         self.frameHandler = nil;
+                        self.audioHandler = nil;
                     }
                     completion(startError);
                 });
@@ -102,8 +154,28 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
     }];
 }
 
+- (void)updateExcludedBundleIDs:(NSArray<NSString *> *)bundleIDs {
+    SCStream *stream = self.stream;
+    SCDisplay *display = self.display;
+    if (!stream || !display) return;
+    [SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:YES
+                                                 completionHandler:^(SCShareableContent *content, NSError *error) {
+        if (!content) return;
+        SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display
+                                                     excludingApplications:ARExcludedApps(content, bundleIDs)
+                                                          exceptingWindows:@[]];
+        [stream updateContentFilter:filter completionHandler:^(NSError *updateError) {}];
+    }];
+}
+
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type {
-    if (type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sampleBuffer)) return;
+    if (!CMSampleBufferIsValid(sampleBuffer)) return;
+    if (type == SCStreamOutputTypeAudio) {
+        void (^audio)(CMSampleBufferRef) = self.audioHandler;
+        if (audio) audio(sampleBuffer);
+        return;
+    }
+    if (type != SCStreamOutputTypeScreen) return;
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
     if (!attachments || CFArrayGetCount(attachments) == 0) return;
     NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(attachments, 0);
@@ -119,6 +191,7 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (stream != self.stream) return;
         self.stream = nil;
+        self.audioHandler = nil;
         dispatch_async(self.frameQueue, ^{ self.frameHandler = nil; });
         if (self.stoppedHandler) self.stoppedHandler(error);
     });
@@ -127,6 +200,7 @@ CGSize ARCaptureSize(CGSize points, CGFloat scale, NSInteger maxWidth) {
 - (void)stopWithCompletion:(void (^)(void))completion {
     SCStream *stream = self.stream;
     self.stream = nil;
+    self.audioHandler = nil;
     void (^finish)(void) = ^{
         dispatch_async(self.frameQueue, ^{
             self.frameHandler = nil;

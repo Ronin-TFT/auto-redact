@@ -19,8 +19,20 @@ uint32_t ARTextKey(NSString *text);
 @interface ARRecognizer : NSObject
 /// YES 时使用精确模式：识别中文，小字、浅色字、深色背景也更可靠，但较慢；NO 时为快速模式（英文与数字）。
 @property (nonatomic) BOOL recognizesChinese;
+/// 同时识别二维码、条形码（类型为 qrcode）。
+@property (nonatomic) BOOL detectsCodes;
+/// 同时识别人脸（类型为 face）。
+@property (nonatomic) BOOL detectsFaces;
 - (NSArray<ARDetection *> *)detectionsInPixelBuffer:(CVPixelBufferRef)buffer;
+/// 只识别画面中的一块区域（像素坐标，左上角原点）；结果仍是整幅画面的像素坐标。
+- (NSArray<ARDetection *> *)detectionsInPixelBuffer:(CVPixelBufferRef)buffer region:(NSRect)region;
 @end
+
+/// 像素矩形（左上角原点）转换为 Vision 的归一化矩形（左下角原点），并裁剪到画面内。
+CGRect ARNormalizedFromPixelRect(NSRect pixelRect, size_t width, size_t height);
+
+/// 相对于识别区域 roi（归一化）的结果矩形，换算为相对于整幅画面的归一化矩形。
+CGRect ARNormalizedInROI(CGRect resultInROI, CGRect roi);
 
 /// 按字符位置估算 range 在整行 line 中的位置（归一化坐标），用于识别结果没有精确位置时。
 CGRect ARApproximateRangeBox(CGRect line, NSString *text, NSRange range);

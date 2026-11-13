@@ -46,7 +46,7 @@ jobs:
           go build -buildmode=c-archive -o build/libredact.a .
           clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) mac/ARMotion.c build/libredact.a \
             -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
-            -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test
+            -framework CoreImage -framework Vision -framework CoreFoundation -framework AVKit -framework Carbon -o build/mac-test
           build/mac-test
       - run: ./build_dmg.sh
       - uses: actions/upload-artifact@v4

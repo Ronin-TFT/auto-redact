@@ -20,6 +20,19 @@
 - 密码 / 验证码：`密码：xxx`、`password = xxx`、`验证码: 123456` 的值
 - IP 地址（默认关闭）
 - 自定义关键词（人名、公司名、项目代号……；中文关键词需勾选“精确识别”）
+- 二维码 / 条形码（默认开启，不依赖文字识别）
+- 人脸（默认关闭，遮挡范围比脸略大）
+
+## 隐私与其他功能
+
+- **隐私 App**：选几个 App（微信、邮件、密码管理器……），录屏时它们的窗口不会出现在录像里，遮挡模式下整块盖住，不依赖文字识别。
+- **系统通知**：录屏时横幅通知、通知中心不会被录进去；遮挡模式下整块盖住（默认开启）。
+- **固定遮挡区域**：框选屏幕上始终要遮住的位置（书签栏、侧边栏……），两种模式都生效。
+- **录制范围**：整个屏幕，或框选一块区域（录制时屏幕上用红色虚线标出，不会录进去）。
+- **声音**：可同时录系统声音（不含本 App）和麦克风，可选麦克风设备。
+- **录完复查**：录完自动打开复查窗口，按打码片段跳转、逐帧检查；漏掉的地方框选后设定起止时间，导出“修正版”。
+- **全局快捷键**：⌃⌥⌘R 开始 / 停止录屏，⌃⌥⌘H 开始 / 停止遮挡（App 在后台也能用；被占用时在“快捷键”页提示）。
+- **更省电的识别**：画面不变时不重复识别；只有一小块变化时只识别那一块，每秒至少整屏识别一次。按原始分辨率识别，小字更可靠，录像再按所选画质缩放。
 
 识别频率用滑块调节（每秒 1–15 次）。启动时会用一张样例画面实测本机识别一帧的耗时，在滑块旁显示推荐值（识别最多占一半时间，余量留给追踪和录制），点“使用推荐值”即可。
 
@@ -35,6 +48,7 @@ open dist/AutoRedact.dmg
 ```
 
 首次使用需要在 **系统设置 → 隐私与安全性 → 屏幕与系统录音** 中允许“自动打码”，然后重新打开 App。
+录麦克风时还需要允许 **麦克风** 权限（第一次勾选时系统会询问）。
 使用临时签名时，每次重新打包都需要重新授权。
 
 ## 测试
@@ -52,7 +66,7 @@ mkdir -p build && cc -O2 -I mac tests/motion_test.c mac/ARMotion.c -lm -o build/
 mkdir -p build && go build -buildmode=c-archive -o build/libredact.a .
 clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) mac/ARMotion.c build/libredact.a \
   -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
-  -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test && build/mac-test
+  -framework CoreImage -framework Vision -framework CoreFoundation -framework AVKit -framework Carbon -o build/mac-test && build/mac-test
 ```
 
 ## 代码结构
@@ -67,7 +81,12 @@ clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m)
 | `mac/ARRecordSession.m` | 录屏模式：延迟写入、打码、H.264 MP4 |
 | `mac/AROverlaySession.m` | 遮挡模式：遮挡窗口 |
 | `mac/ARRedact.m` | 马赛克 / 模糊 / 色块渲染 |
-| `mac/ARAppDelegate.m` | 界面、菜单栏、设置 |
+| `mac/ARMicrophone.m` | 麦克风录音 |
+| `mac/ARPrivacyWindows.m` | 隐私 App、系统通知的窗口位置 |
+| `mac/ARRegionSelector.m` | 框选录制范围、固定遮挡区域 |
+| `mac/ARHotkeys.m` | 全局快捷键 |
+| `mac/ARReviewController.m`、`mac/ARPatchExporter.m` | 录完复查、手动补打码并导出 |
+| `mac/ARAppDelegate.m` | 界面（分页）、菜单栏、设置 |
 
 ## 识别不稳定时
 

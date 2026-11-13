@@ -45,6 +45,24 @@ int ARMotionBoxesForFrame(const ARMotionSession *session, long frameId, ARBox *o
 /// 实时遮挡用：当前（最新一帧）的打码区域，并按追踪到的速度覆盖之后 framesAhead 帧会经过的位置。
 int ARMotionPredictedBoxes(const ARMotionSession *session, double framesAhead, ARBox *out, int max);
 
+/// 帧 fromId 到 toId 之间画面发生变化的区域（原始像素坐标的外接矩形），用于只识别变化的部分。
+/// 有变化返回 1 并写入 out；没有变化或帧已释放返回 0。
+int ARMotionChangedRegion(const ARMotionSession *session, long fromId, long toId, ARBox *out);
+
+typedef enum {
+    ARRecognizeNone = 0,   // 画面自上次识别后没有变化，跳过
+    ARRecognizeFull = 1,   // 识别整个画面
+    ARRecognizeRegion = 2, // 只识别变化的区域（写入 region）
+} ARRecognizePlan;
+
+/// 决定这一帧怎么识别：从未识别过、或距上次整屏识别已超过 fullInterval 秒时识别整屏；
+/// 否则只识别自上次识别以来变化的区域（向外扩大 margin 像素）；变化区域超过画面 60% 时也识别整屏。
+ARRecognizePlan ARMotionPlanRecognition(const ARMotionSession *session, long lastRecognizedFrame, long currentFrame,
+                                        double secondsSinceFull, double fullInterval, double margin, ARBox *region);
+
+/// 按画面宽度选择追踪用的缩小倍数，使追踪画面宽约 960 像素。
+int ARMotionFactorForWidth(int width);
+
 /// 释放编号小于 frameId 的帧（最新一帧总会保留）。
 void ARMotionRelease(ARMotionSession *session, long frameId);
 
