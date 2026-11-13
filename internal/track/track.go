@@ -10,20 +10,24 @@ import (
 	"sort"
 )
 
-// Rect 是像素坐标（左上角为原点）的矩形。
+// Rect 是像素坐标（左上角为原点）的矩形。Key 是这处文字内容的指纹（哈希），
+// 用来在前后两次识别之间找到同一处文字；0 表示未知。
 type Rect struct {
 	X, Y, W, H float64
+	Key        uint32
 }
+
+func (r Rect) shift(dx, dy float64) Rect { return Rect{r.X + dx, r.Y + dy, r.W, r.H, r.Key} }
 
 func (r Rect) maxX() float64 { return r.X + r.W }
 func (r Rect) maxY() float64 { return r.Y + r.H }
 
 func union(a, b Rect) Rect {
 	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
-	return Rect{x, y, math.Max(a.maxX(), b.maxX()) - x, math.Max(a.maxY(), b.maxY()) - y}
+	return Rect{x, y, math.Max(a.maxX(), b.maxX()) - x, math.Max(a.maxY(), b.maxY()) - y, 0}
 }
 
-func (r Rect) inset(d float64) Rect { return Rect{r.X - d, r.Y - d, r.W + 2*d, r.H + 2*d} }
+func (r Rect) inset(d float64) Rect { return Rect{r.X - d, r.Y - d, r.W + 2*d, r.H + 2*d, 0} }
 
 func (r Rect) clip(width, height float64) (Rect, bool) {
 	x0, y0 := math.Max(0, r.X), math.Max(0, r.Y)
@@ -37,7 +41,7 @@ func (r Rect) clip(width, height float64) (Rect, bool) {
 	if x1 <= x0 || y1 <= y0 {
 		return Rect{}, false
 	}
-	return Rect{x0, y0, x1 - x0, y1 - y0}, true
+	return Rect{x0, y0, x1 - x0, y1 - y0, 0}, true
 }
 
 type entry struct {
@@ -120,27 +124,132 @@ func (tr *Tracker) BoxesAt(t float64) []Rect {
 	return tr.finish(out)
 }
 
-// motionHulls 把前后两次识别中大小相近、距离最近的框配对，返回覆盖整段移动的外接矩形。
+// motionHulls 返回覆盖文字在两次识别之间移动范围的外接矩形。
+//
+// 先按内容指纹配对（同一处文字前后各出现一次时最可靠）；用这些配对估算整体滚动量，
+// 给刚滚入或滚出画面、只出现一次的文字补上移动范围；同样内容出现多次时无法区分，
+// 与每个候选都取外接矩形（宁可多遮）。没有指纹时按大小和位置保守处理。
 func (tr *Tracker) motionHulls(a, b []Rect) []Rect {
-	used := make([]bool, len(b))
 	var out []Rect
+	dx, dy, haveShift := tr.estimateShift(a, b)
+	matched := make([]bool, len(b))
 	for _, ra := range a {
-		best, bestDist := -1, math.Inf(1)
-		for j, rb := range b {
-			if used[j] || !similarSize(ra, rb) {
-				continue
-			}
-			dist := math.Hypot(rb.X-ra.X, rb.Y-ra.Y)
-			if dist < bestDist && dist <= tr.MaxMove {
-				best, bestDist = j, dist
+		tol := math.Max(4, ra.H/2)
+		var same []int
+		if ra.Key != 0 {
+			for j, rb := range b {
+				if rb.Key == ra.Key && similarSize(ra, rb) && tr.within(ra, rb) {
+					same = append(same, j)
+				}
 			}
 		}
-		if best >= 0 && bestDist > 0 {
-			used[best] = true
-			out = append(out, union(ra, b[best]))
+		switch {
+		case len(same) > 0:
+			for _, j := range same {
+				matched[j] = true
+				if displacement(ra, b[j]) > tol {
+					out = append(out, union(ra, b[j]))
+				}
+			}
+		case haveShift:
+			out = append(out, union(ra, ra.shift(dx, dy)))
+		default:
+			// 没有可靠信息：附近有几乎不动的同尺寸框就认为静止，否则与所有候选取外接矩形。
+			var candidates []Rect
+			static := false
+			for _, rb := range b {
+				if similarSize(ra, rb) && tr.within(ra, rb) {
+					if displacement(ra, rb) <= tol {
+						static = true
+						break
+					}
+					candidates = append(candidates, rb)
+				}
+			}
+			if !static {
+				for _, rb := range candidates {
+					out = append(out, union(ra, rb))
+				}
+			}
+		}
+	}
+	if haveShift {
+		for j, rb := range b {
+			if !matched[j] {
+				out = append(out, union(rb.shift(-dx, -dy), rb))
+			}
 		}
 	}
 	return out
+}
+
+// estimateShift 用前后各只出现一次的同一内容估算整体移动量（取中位数）。
+func (tr *Tracker) estimateShift(a, b []Rect) (float64, float64, bool) {
+	count := func(rs []Rect) map[uint32]int {
+		m := map[uint32]int{}
+		for _, r := range rs {
+			if r.Key != 0 {
+				m[r.Key]++
+			}
+		}
+		return m
+	}
+	ca, cb := count(a), count(b)
+	var xs, ys []float64
+	for _, ra := range a {
+		if ra.Key == 0 || ca[ra.Key] != 1 || cb[ra.Key] != 1 {
+			continue
+		}
+		for _, rb := range b {
+			if rb.Key == ra.Key && similarSize(ra, rb) && tr.within(ra, rb) {
+				xs = append(xs, rb.X-ra.X)
+				ys = append(ys, rb.Y-ra.Y)
+			}
+		}
+	}
+	if len(xs) == 0 {
+		return 0, 0, false
+	}
+	return median(xs), median(ys), true
+}
+
+func median(v []float64) float64 {
+	s := append([]float64(nil), v...)
+	sort.Float64s(s)
+	n := len(s)
+	if n%2 == 1 {
+		return s[n/2]
+	}
+	return (s[n/2-1] + s[n/2]) / 2
+}
+
+func displacement(a, b Rect) float64 { return math.Hypot(b.X-a.X, b.Y-a.Y) }
+
+func (tr *Tracker) within(a, b Rect) bool { return displacement(a, b) <= tr.MaxMove }
+
+// BoxesAhead 用于实时遮挡：在最近的结果之外，按最近两次识别估算的移动速度，
+// 预测 ahead 秒后文字的位置，并覆盖从现在到那时的移动范围。
+func (tr *Tracker) BoxesAhead(t, ahead float64) []Rect {
+	boxes := tr.BoxesAt(t)
+	n := len(tr.history)
+	if n < 2 || ahead <= 0 {
+		return boxes
+	}
+	prev, last := tr.history[n-2], tr.history[n-1]
+	dt := last.t - prev.t
+	if dt <= 0 || dt > 2 {
+		return boxes
+	}
+	dx, dy, ok := tr.estimateShift(prev.boxes, last.boxes)
+	if !ok || math.Hypot(dx, dy) < 2 {
+		return boxes
+	}
+	vx, vy := dx/dt, dy/dt
+	var predicted []Rect
+	for _, r := range last.boxes {
+		predicted = append(predicted, union(r, r.shift(vx*ahead, vy*ahead)))
+	}
+	return tr.finish(append(boxes, predicted...))
 }
 
 func similarSize(a, b Rect) bool {

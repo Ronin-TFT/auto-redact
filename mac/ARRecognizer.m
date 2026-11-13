@@ -29,11 +29,21 @@ CGRect ARApproximateRangeBox(CGRect line, NSString *text, NSRange range) {
     return CGRectMake(minX, line.origin.y, MAX(0, maxX - minX), line.size.height);
 }
 
+uint32_t ARTextKey(NSString *text) {
+    uint32_t hash = 2166136261u;
+    for (NSUInteger i = 0; i < text.length; i++) {
+        hash ^= [text characterAtIndex:i];
+        hash *= 16777619u;
+    }
+    return hash ? hash : 1;
+}
+
 @implementation ARDetection
-- (instancetype)initWithRect:(NSRect)rect kind:(NSString *)kind {
+- (instancetype)initWithRect:(NSRect)rect kind:(NSString *)kind key:(uint32_t)key {
     if ((self = [super init])) {
         _rect = rect;
         _kind = [kind copy];
+        _key = key;
     }
     return self;
 }
@@ -79,7 +89,8 @@ CGRect ARApproximateRangeBox(CGRect line, NSString *text, NSRange range) {
                     normalized = ARApproximateRangeBox(line, texts[i].string, range);
                 }
                 [out addObject:[[ARDetection alloc] initWithRect:ARPixelRectFromNormalized(normalized, width, height)
-                                                            kind:match[@"kind"]]];
+                                                            kind:match[@"kind"]
+                                                             key:ARTextKey([texts[i].string substringWithRange:range])]];
             }
         }
         return out;

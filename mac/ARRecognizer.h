@@ -7,8 +7,13 @@ NS_ASSUME_NONNULL_BEGIN
 @interface ARDetection : NSObject
 @property (nonatomic, readonly) NSRect rect;
 @property (nonatomic, readonly, copy) NSString *kind;
-- (instancetype)initWithRect:(NSRect)rect kind:(NSString *)kind;
+/// 内容指纹（被打码文字的哈希，不保存原文），用于在前后两次识别之间找到同一处文字。
+@property (nonatomic, readonly) uint32_t key;
+- (instancetype)initWithRect:(NSRect)rect kind:(NSString *)kind key:(uint32_t)key;
 @end
+
+/// 文字的 32 位指纹（FNV-1a），保证不为 0。
+uint32_t ARTextKey(NSString *text);
 
 /// 用 Vision 识别画面中的文字，再交给引擎找出敏感信息。同步执行，请在后台队列调用。
 @interface ARRecognizer : NSObject

@@ -35,6 +35,17 @@ int main(void) {
     assert(strcmp(boxes, "[[100,300,200,30]]") == 0);
     ARFree(boxes);
 
+    // 带内容指纹的滚动：两处内容不同的文字一起向上移动 300 像素。
+    ARTrackReset(1000, 800, 0, 0.5);
+    ARTrackAdd(0.0, "[[100,500,200,30,11],[100,620,200,30,22]]");
+    ARTrackAdd(0.2, "[[100,200,200,30,11],[100,320,200,30,22]]");
+    boxes = ARTrackBoxes(0.1);
+    assert(strcmp(boxes, "[[100,200,200,450]]") == 0);
+    ARFree(boxes);
+    boxes = ARTrackBoxesAhead(0.2, 0.1);
+    assert(strstr(boxes, "[100,50,") != NULL);
+    ARFree(boxes);
+
     puts("bridge configure, find and track passed");
     return 0;
 }

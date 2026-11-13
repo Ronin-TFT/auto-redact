@@ -84,19 +84,35 @@ func ARTrackReset(width, height, padding, hold C.double) {
 	}
 }
 
+// decodeRects 读取 [[x,y,w,h],...] 或带内容指纹的 [[x,y,w,h,key],...]。
 func decodeRects(s string) []track.Rect {
-	var raw [][4]float64
+	var raw [][]float64
 	if json.Unmarshal([]byte(s), &raw) != nil {
 		return nil
 	}
 	rects := make([]track.Rect, 0, len(raw))
 	for _, r := range raw {
-		rects = append(rects, track.Rect{X: r[0], Y: r[1], W: r[2], H: r[3]})
+		if len(r) < 4 {
+			continue
+		}
+		rect := track.Rect{X: r[0], Y: r[1], W: r[2], H: r[3]}
+		if len(r) >= 5 && r[4] > 0 && r[4] < 1<<32 {
+			rect.Key = uint32(r[4])
+		}
+		rects = append(rects, rect)
 	}
 	return rects
 }
 
-// ARTrackAdd 记录时间 t（秒）的识别结果 [[x,y,w,h],...]（像素，左上角原点）。
+func encodeRects(boxes []track.Rect) *C.char {
+	out := make([][4]float64, len(boxes))
+	for i, b := range boxes {
+		out[i] = [4]float64{b.X, b.Y, b.W, b.H}
+	}
+	return jsonString(out)
+}
+
+// ARTrackAdd 记录时间 t（秒）的识别结果 [[x,y,w,h,key],...]（像素，左上角原点；key 为内容指纹，可省略）。
 //
 //export ARTrackAdd
 func ARTrackAdd(t C.double, boxesJSON *C.char) {
@@ -125,11 +141,17 @@ func ARTrackBoxes(t C.double) *C.char {
 	mu.Lock()
 	boxes := tracker.BoxesAt(float64(t))
 	mu.Unlock()
-	out := make([][4]float64, len(boxes))
-	for i, b := range boxes {
-		out[i] = [4]float64{b.X, b.Y, b.W, b.H}
-	}
-	return jsonString(out)
+	return encodeRects(boxes)
+}
+
+// ARTrackBoxesAhead 用于实时遮挡：在时间 t 的结果之外，按滚动速度预测 ahead 秒内文字经过的位置。
+//
+//export ARTrackBoxesAhead
+func ARTrackBoxesAhead(t, ahead C.double) *C.char {
+	mu.Lock()
+	boxes := tracker.BoxesAhead(float64(t), float64(ahead))
+	mu.Unlock()
+	return encodeRects(boxes)
 }
 
 //export ARFree

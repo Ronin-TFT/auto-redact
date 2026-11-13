@@ -208,12 +208,10 @@ static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolR
     dispatch_async(self.recognizeQueue, ^{
         NSArray<ARDetection *> *detections = [self.recognizer detectionsInPixelBuffer:pixels];
         CVPixelBufferRelease(pixels);
-        NSMutableArray<NSValue *> *rects = [NSMutableArray array];
-        for (ARDetection *d in detections) [rects addObject:[NSValue valueWithRect:d.rect]];
         dispatch_async(self.capture.frameQueue, ^{
-            [AREngine addBoxes:rects atTime:time];
+            [AREngine addDetections:detections atTime:time];
             self.recognizing = NO;
-            dispatch_async(dispatch_get_main_queue(), ^{ self.currentCount = rects.count; });
+            dispatch_async(dispatch_get_main_queue(), ^{ self.currentCount = detections.count; });
             [self drainForce:NO];
         });
     });
@@ -269,10 +267,7 @@ static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolR
         // 帧队列：对最后一帧再识别一次，保证结尾的帧也有“之后”的结果，然后全部写完。
         ARPendingFrame *last = self.pending.lastObject;
         if (last) {
-            NSArray<ARDetection *> *detections = [self.recognizer detectionsInPixelBuffer:last->pixels];
-            NSMutableArray<NSValue *> *rects = [NSMutableArray array];
-            for (ARDetection *d in detections) [rects addObject:[NSValue valueWithRect:d.rect]];
-            [AREngine addBoxes:rects atTime:last->time];
+            [AREngine addDetections:[self.recognizer detectionsInPixelBuffer:last->pixels] atTime:last->time];
         }
         [self drainForce:YES];
         AVAssetWriter *writer = self.writer;

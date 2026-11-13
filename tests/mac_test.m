@@ -56,6 +56,10 @@ int main(void) {
         assert(near(approx.origin.x * 100, 30) && near(approx.size.width * 100, 40));
         CGRect wide = ARApproximateRangeBox(CGRectMake(0, 0, 1, 0.1), @"电话ab", NSMakeRange(2, 2));
         assert(near(wide.origin.x * 100, 50) && near(wide.size.width * 100, 50));
+        NSArray *scrolls = @[@[@1.0, @5, @-20], @[@2.0, @-3, @40], @[@3.0, @0, @-10]];
+        NSSize scrolled = ARScrollSince(scrolls, 1.5);
+        assert(near(scrolled.width, 3) && near(scrolled.height, 50));
+        assert(ARTextKey(@"13800138000") == ARTextKey(@"13800138000") && ARTextKey(@"a") != ARTextKey(@"b") && ARTextKey(@"") != 0);
         NSArray *words = ARSplitKeywords(@" 张三，李四, 张三\n项目 X ");
         assert([words isEqualToArray:(@[@"张三", @"李四", @"项目 X"])]);
 
