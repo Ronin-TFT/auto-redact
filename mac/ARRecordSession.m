@@ -17,7 +17,7 @@ static const double ARReadyDelay = 0.25;
 static const double ARFullInterval = 1.0;
 /// 缓存画面的内存上限（字节）。
 static const double ARBufferBudget = 700.0 * 1024 * 1024;
-static const int ARMaxBoxes = 256;
+enum { ARMaxBoxes = 256 };
 /// 同一类型间隔超过这么久就算新的一段（复查列表）。
 static const double ARSegmentGap = 2.0;
 

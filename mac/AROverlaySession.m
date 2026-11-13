@@ -12,7 +12,7 @@ static const long ARKeepFrames = 24;
 static const double ARLatencyFrames = 2;
 /// 至少每隔这么久识别一次整个画面（其余时候只识别变化的区域）。
 static const double ARFullInterval = 1.0;
-static const int ARMaxBoxes = 256;
+enum { ARMaxBoxes = 256 };
 
 NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
     CGFloat sx = screen.size.width / MAX(pixelSize.width, 1), sy = screen.size.height / MAX(pixelSize.height, 1);
