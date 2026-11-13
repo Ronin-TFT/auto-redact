@@ -37,6 +37,8 @@ open dist/AutoRedact.dmg
 
 ## 测试
 
+完整的测试步骤和手动测试清单见 [docs/TESTING.md](docs/TESTING.md)，测试数据用 [tests/fixtures/sensitive-sample.txt](tests/fixtures/sensitive-sample.txt)（全部为虚构数据）。
+
 ```sh
 # 识别规则与跟踪逻辑（任意平台）
 go test ./...
