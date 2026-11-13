@@ -17,7 +17,7 @@ uint32_t ARTextKey(NSString *text);
 
 /// 用 Vision 识别画面中的文字，再交给引擎找出敏感信息。同步执行，请在后台队列调用。
 @interface ARRecognizer : NSObject
-/// YES 时使用精确模式并识别中文（用于中文关键词，较慢）；NO 时为快速模式（英文与数字）。
+/// YES 时使用精确模式：识别中文，小字、浅色字、深色背景也更可靠，但较慢；NO 时为快速模式（英文与数字）。
 @property (nonatomic) BOOL recognizesChinese;
 - (NSArray<ARDetection *> *)detectionsInPixelBuffer:(CVPixelBufferRef)buffer;
 @end

@@ -179,17 +179,26 @@ func (d *Detector) Find(text string) []Match {
 	return toUTF16(text, mergeSpans(spans))
 }
 
-// normalizeDigits 把夹在数字中间、容易被 OCR 认错的字母（O→0，l/I/|→1）换成数字。长度不变，偏移不受影响。
+// normalizeDigits 把紧挨着数字、容易被 OCR 认错的字母换成数字（O/o/D→0，l/I/|→1，Z/z→2，S/s→5，B→8，g/q→9）。
+// 长度不变，偏移不受影响。小字、浅色字识别时最容易出现这类错误。
 func normalizeDigits(s string) string {
 	b := []byte(s)
 	isDigit := func(i int) bool { return i >= 0 && i < len(b) && b[i] >= '0' && b[i] <= '9' }
 	for i, c := range b {
 		var r byte
 		switch c {
-		case 'O', 'o':
+		case 'O', 'o', 'D':
 			r = '0'
 		case 'l', 'I', '|':
 			r = '1'
+		case 'Z', 'z':
+			r = '2'
+		case 'S', 's':
+			r = '5'
+		case 'B':
+			r = '8'
+		case 'g', 'q':
+			r = '9'
 		default:
 			continue
 		}

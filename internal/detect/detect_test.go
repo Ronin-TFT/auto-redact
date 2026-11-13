@@ -45,6 +45,9 @@ func TestOCRDigitConfusion(t *testing.T) {
 	d := New(Config{})
 	expect(t, d, "手机 1380O138OOO", "1380O138OOO")
 	expect(t, d, "Hello World OOO lll")
+	expect(t, d, "电话 138OOl3BOOO", "138OOl3BOOO")
+	expect(t, d, "1S8 0Z13 8000", "1S8 0Z13 8000")
+	expect(t, d, "gross sales 2024 Q3")
 }
 
 func TestEmailAndKeywords(t *testing.T) {

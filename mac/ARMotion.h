@@ -20,7 +20,8 @@ typedef struct {
 typedef struct ARMotionSession ARMotionSession;
 
 /// width/height 为画面像素大小；factor 为追踪用的缩小倍数（建议 2）。
-/// padding 为每个打码框向外扩展的像素；hold 为识别漏掉后继续追踪的秒数。
+/// padding 为每个打码框向外扩展的像素。已识别的内容只要追踪确认画面还在就一直遮住；
+/// hold 为追踪失败（画面内容变了）后继续保留遮挡的秒数。
 ARMotionSession *ARMotionCreate(int width, int height, int factor, double padding, double hold);
 void ARMotionDestroy(ARMotionSession *session);
 

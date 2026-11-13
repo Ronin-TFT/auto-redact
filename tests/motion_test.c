@@ -106,6 +106,7 @@ typedef struct {
     int frames, period, latency, skipRound;
     double (*speed)(int frame);
     int checkPrediction;
+    int missPercent; // 每一处内容每次识别被漏掉的概率（%），模拟小字、浅色字时有时无
 } Scenario;
 
 typedef struct {
@@ -115,19 +116,22 @@ typedef struct {
     int predictionMisses;
 } Result;
 
-/// 已送达的识别所对应的帧（被跳过的那次不算）。
+/// 已送达的识别所对应的帧，以及每次识别到了哪些内容。
 static long detectionFrames[512];
+static uint32_t detectionKeys[512][MAXI];
+static int detectionCounts[512];
 static int ndetections;
 
 static int onScreen(const Item *it) { return it->y + it->h > 0 && it->y < H && it->x + it->w > 0 && it->x < W; }
-static int fullyVisible(const Item *it) { return it->y >= 0 && it->y + it->h <= H && it->x >= 0 && it->x + it->w <= W; }
 
 /// 某一项在第 f 帧是否“能被识别”：存在一次已送达的识别，那一帧它完整可见，
 /// 且从那一帧到第 f 帧它一直在画面内（可以连续追踪过来）。
 static int recognizable(const Scene *history, long f, int item) {
     for (int d = 0; d < ndetections; d++) {
         long k = detectionFrames[d];
-        if (!fullyVisible(&history[k].list[item])) continue;
+        int seenHere = 0;
+        for (int i = 0; i < detectionCounts[d]; i++) seenHere |= detectionKeys[d][i] == history[k].list[item].seed;
+        if (!seenHere) continue;
         long a = k < f ? k : f, b = k < f ? f : k;
         int continuous = 1;
         for (long j = a; j <= b && continuous; j++) continuous = onScreen(&history[j].list[item]);
@@ -190,12 +194,24 @@ static Result run(const Scenario *sc) {
         assert(id == f);
         if (f % sc->period == 0 && deliverAt < 0) {
             pendingCount = (round++ == sc->skipRound) ? 0 : detect(&scene, pendingBoxes, pendingKeys);
+            if (sc->missPercent) {
+                int kept = 0;
+                for (int i = 0; i < pendingCount; i++) {
+                    if (mix(pendingKeys[i], (uint32_t)f, 99) % 100 < (uint32_t)sc->missPercent) continue;
+                    pendingBoxes[kept] = pendingBoxes[i];
+                    pendingKeys[kept++] = pendingKeys[i];
+                }
+                pendingCount = kept;
+            }
             pendingFrame = f;
             deliverAt = f + sc->latency;
         }
         if (f == deliverAt) {
             ARMotionAddDetections(m, pendingFrame, pendingBoxes, pendingKeys, pendingCount);
-            if (pendingCount > 0) detectionFrames[ndetections++] = pendingFrame;
+            detectionFrames[ndetections] = pendingFrame;
+            detectionCounts[ndetections] = pendingCount;
+            memcpy(detectionKeys[ndetections], pendingKeys, sizeof(uint32_t) * (size_t)pendingCount);
+            ndetections++;
             for (int i = 0; i < pendingCount; i++) {
                 int known = 0;
                 for (int k = 0; k < nseen; k++) known |= seen[k] == pendingKeys[i];
@@ -225,7 +241,10 @@ static Result run(const Scenario *sc) {
     uint32_t finalKeys[MAXI];
     int nfinal = detect(&history[last], finalBoxes, finalKeys);
     ARMotionAddDetections(m, last, finalBoxes, finalKeys, nfinal);
-    detectionFrames[ndetections++] = last;
+    detectionFrames[ndetections] = last;
+    detectionCounts[ndetections] = nfinal;
+    memcpy(detectionKeys[ndetections], finalKeys, sizeof(uint32_t) * (size_t)nfinal);
+    ndetections++;
     for (; written <= last; written++) writeFrame(m, written, history, &r, &st);
     r.areaRatio = st.ratioN ? st.ratioSum / st.ratioN : 0;
     free(frame);
@@ -240,17 +259,20 @@ static double veryFast(int f) { (void)f; return 45; }                     // 每
 static double burst(int f) { return f < 20 ? 0 : f < 50 ? (f - 20) * 1.5 : f < 70 ? 45 : f < 100 ? (100 - f) * 1.5 : 0; }
 static double jitter(int f) { return (f / 7) % 2 ? 30 : -18; }            // 来回滚动
 static double fractional(int f) { (void)f; return 17.3; }                 // 非整数速度（画面缩放后常见）
+static double slow(int f) { (void)f; return 3; }                          // 慢慢阅读时的滚动
 
 int main(void) {
     struct { const char *name; Scenario sc; double maxRatio; } cases[] = {
-        {"静止画面", {60, 6, 3, -1, still, 0}, 1.3},
-        {"快速滚动（1500 像素/秒）", {120, 6, 3, -1, fast, 0}, 1.6},
-        {"极快滚动（2700 像素/秒）", {120, 6, 3, -1, veryFast, 0}, 1.8},
-        {"加速、匀速、减速", {130, 6, 3, -1, burst, 0}, 1.6},
-        {"来回滚动", {120, 6, 3, -1, jitter, 0}, 1.8},
-        {"识别漏掉一次", {120, 6, 3, 5, fast, 0}, 1.8},
-        {"非整数速度（每帧 17.3 像素）", {120, 6, 3, -1, fractional, 0}, 1.6},
-        {"识别慢（每 12 帧一次，延迟 8 帧）", {150, 12, 8, -1, fast, 0}, 1.8},
+        {"静止画面", {60, 6, 3, -1, still, 0, 0}, 1.3},
+        {"快速滚动（1500 像素/秒）", {120, 6, 3, -1, fast, 0, 0}, 1.6},
+        {"极快滚动（2700 像素/秒）", {120, 6, 3, -1, veryFast, 0, 0}, 1.8},
+        {"加速、匀速、减速", {130, 6, 3, -1, burst, 0, 0}, 1.6},
+        {"来回滚动", {120, 6, 3, -1, jitter, 0, 0}, 1.8},
+        {"识别漏掉一次", {120, 6, 3, 5, fast, 0, 0}, 1.8},
+        {"非整数速度（每帧 17.3 像素）", {120, 6, 3, -1, fractional, 0, 0}, 1.6},
+        {"静止 + 识别时有时无（漏 60%）", {180, 6, 3, -1, still, 0, 60}, 1.3},
+        {"慢速滚动 + 识别时有时无（漏 60%）", {180, 6, 3, -1, slow, 0, 60}, 1.3},
+        {"识别慢（每 12 帧一次，延迟 8 帧）", {150, 12, 8, -1, fast, 0, 0}, 1.8},
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
@@ -261,10 +283,16 @@ int main(void) {
         printf("\n");
         failed += !ok;
     }
-    Scenario live = {120, 6, 3, -1, fast, 1};
-    Result r = run(&live);
-    printf("%s %-36s 预测漏掉 %d 次\n", r.predictionMisses <= 30 ? "✅" : "❌", "实时遮挡：按速度预测", r.predictionMisses);
-    failed += r.predictionMisses > 30;
+    struct { const char *name; Scenario sc; } live[] = {
+        {"实时遮挡：快速滚动 + 按速度预测", {120, 6, 3, -1, fast, 1, 0}},
+        {"实时遮挡：静止 + 识别时有时无（漏 60%）", {240, 6, 3, -1, still, 1, 60}},
+        {"实时遮挡：慢速滚动 + 识别时有时无（漏 60%）", {240, 6, 3, -1, slow, 1, 60}},
+    };
+    for (size_t i = 0; i < sizeof live / sizeof live[0]; i++) {
+        Result r = run(&live[i].sc);
+        printf("%s %-36s 已识别过的内容漏遮 %d 帧次\n", r.predictionMisses == 0 ? "✅" : "❌", live[i].name, r.predictionMisses);
+        failed += r.predictionMisses != 0;
+    }
     printf(failed ? "\n%d failed\n" : "\nall passed\n", failed);
     return failed ? 1 : 0;
 }

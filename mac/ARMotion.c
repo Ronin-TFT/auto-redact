@@ -21,6 +21,7 @@ typedef struct {
     double vx, vy;     // 上一步的位移（原始像素/帧）
     double lastSeen;   // 最近一次被识别到的画面时间
     int lost;          // 连续追踪失败的帧数
+    double lostSince;  // 开始追踪失败的画面时间
     int edge;          // 最近一步内容被画面边缘截断，位置是按速度推算的
 } ARTrack;
 
@@ -257,7 +258,7 @@ static int trackBox(const ARMotionSession *s, const uint8_t *from, const uint8_t
 }
 
 /// 把一个追踪从 from 推进到 to。
-static void stepTrack(const ARMotionSession *s, ARTrack *t, const uint8_t *from, const uint8_t *to) {
+static void stepTrack(const ARMotionSession *s, ARTrack *t, const uint8_t *from, const uint8_t *to, double toTime) {
     double dx = 0, dy = 0;
     switch (trackBox(s, from, to, t->box, t->vx, t->vy, &dx, &dy)) {
     case AR_TRACK_OK:
@@ -274,6 +275,7 @@ static void stepTrack(const ARMotionSession *s, ARTrack *t, const uint8_t *from,
         break;
     default:
         t->box = shiftBox(t->box, t->vx, t->vy);
+        if (t->lost == 0) t->lostSince = toTime;
         t->lost++;
         break;
     }
@@ -337,8 +339,10 @@ long ARMotionAddFrame(ARMotionSession *s, const uint8_t *bgra, int bytesPerRow, 
     int kept = 0;
     for (int i = 0; i < s->ntracks; i++) {
         ARTrack t = s->tracks[i];
-        if (prev && prev->id == frame->id - 1) stepTrack(s, &t, prev->gray, frame->gray);
-        if (time - t.lastSeen > s->hold || offscreen(s, t.box)) continue;
+        if (prev && prev->id == frame->id - 1) stepTrack(s, &t, prev->gray, frame->gray, time);
+        // 追踪确认原位置的画面还在，就一直保持（识别时有时无也不会闪）；
+        // 画面变了（追踪失败）超过 hold 秒才撤掉。
+        if ((t.lost && time - t.lostSince > s->hold) || offscreen(s, t.box)) continue;
         s->tracks[kept++] = t;
         frameAddBox(frame, displayBox(s, &t));
     }
@@ -358,22 +362,22 @@ void ARMotionAddDetections(ARMotionSession *s, long frameId, const ARBox *boxes,
     // 往回追踪：补上这些内容在之前每一帧的位置，一直追到移出画面（刚滚进画面、只露出半截、
     // 识别看不清的那些帧也能遮住）。连续追踪失败太久就停止。
     for (int i = 0; i < count; i++) {
-        ARTrack t = {boxes[i], keys ? keys[i] : 0, 0, 0, frame->time, 0, 0};
+        ARTrack t = {boxes[i], keys ? keys[i] : 0, 0, 0, frame->time, 0, 0, 0};
         double firstVx = 0, firstVy = 0;
         for (long j = idx - 1; j >= 0; j--) {
-            stepTrack(s, &t, s->frames[j + 1].gray, s->frames[j].gray);
+            stepTrack(s, &t, s->frames[j + 1].gray, s->frames[j].gray, s->frames[j].time);
             if (j == idx - 1 && !t.lost) { firstVx = t.vx; firstVy = t.vy; }
             if (offscreen(s, t.box) || (t.lost > 6 && !leaving(s, &t))) break;
             frameAddBox(&s->frames[j], displayBox(s, &t));
         }
         // 紧挨着的前一帧到这一帧的速度，作为往前追踪的初始预测（往回追踪的位移取反）。
-        ARTrack forward = {boxes[i], t.key, -firstVx, -firstVy, frame->time, 0, 0};
+        ARTrack forward = {boxes[i], t.key, -firstVx, -firstVy, frame->time, 0, 0, 0};
         fresh[i] = forward;
     }
     // 往前追踪：识别期间已经到达的帧。
     for (int i = 0; i < count; i++) {
         for (long j = idx + 1; j < s->nframes; j++) {
-            stepTrack(s, &fresh[i], s->frames[j - 1].gray, s->frames[j].gray);
+            stepTrack(s, &fresh[i], s->frames[j - 1].gray, s->frames[j].gray, s->frames[j].time);
             frameAddBox(&s->frames[j], displayBox(s, &fresh[i]));
         }
     }

@@ -55,6 +55,8 @@ uint32_t ARTextKey(NSString *text) {
     @autoreleasepool {
         VNRecognizeTextRequest *request = [VNRecognizeTextRequest new];
         request.usesLanguageCorrection = NO;
+        // 默认会忽略高度小于画面 1/32 的文字（1080p 下约 34 像素，比普通正文还大），小字因此时有时无。
+        request.minimumTextHeight = 0;
         if (self.recognizesChinese) {
             request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
             request.recognitionLanguages = @[@"zh-Hans", @"en-US"];

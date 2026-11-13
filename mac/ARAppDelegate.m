@@ -168,7 +168,7 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
 
     self.keywordsField = [NSTextField textFieldWithString:@""];
     self.keywordsField.placeholderString = @"自定义关键词，用逗号分隔，例如：张三, 公司内部项目名";
-    self.chineseCheck = [NSButton checkboxWithTitle:@"识别中文（中文关键词需要；识别更慢，推荐频率会随之降低）" target:self action:@selector(chineseChanged:)];
+    self.chineseCheck = [NSButton checkboxWithTitle:@"精确识别：支持中文，小字、浅色字、深色模式更可靠（较慢，推荐频率会随之降低）" target:self action:@selector(chineseChanged:)];
     self.rateSlider = [NSSlider sliderWithValue:5 minValue:ARMinRecognitionRate maxValue:ARMaxRecognitionRate
                                          target:self action:@selector(rateChanged:)];
     self.rateSlider.numberOfTickMarks = ARMaxRecognitionRate - ARMinRecognitionRate + 1;
