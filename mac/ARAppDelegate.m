@@ -48,7 +48,7 @@ static CGDirectDisplayID ARDisplayID(NSScreen *screen) {
 @property (nonatomic, strong) NSTextField *recommendLabel;
 @property (nonatomic, strong) NSButton *useRecommendedButton;
 @property (nonatomic) NSInteger recommendedRate;
-/// 每次开始测速递增，丢弃过时的测速结果（切换“识别中文”时会重新测）。
+/// 每次开始测速递增，丢弃过时的测速结果（切换“精确识别”时会重新测）。
 @property (nonatomic) NSUInteger measureGeneration;
 @property (nonatomic, strong) NSPopUpButton *stylePopup;
 @property (nonatomic, strong) NSPopUpButton *qualityPopup;
