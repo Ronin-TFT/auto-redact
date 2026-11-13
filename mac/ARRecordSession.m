@@ -1,12 +1,19 @@
 #import "ARRecordSession.h"
 #import <AVFoundation/AVFoundation.h>
 #import "ARCapture.h"
-#import "AREngine.h"
+#import "ARMotion.h"
 #import "ARRecognizer.h"
 
 static NSError *ARRecordError(NSString *message) {
     return [NSError errorWithDomain:@"AutoRedact.Record" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
 }
+
+/// 写入前等待的最短时间：之后的一次识别要比这一帧晚这么久，
+/// 让刚滚进画面、当时还识别不到的内容能被往回追踪补上。
+static const double ARReadyDelay = 0.25;
+/// 缓存画面的内存上限（字节）。
+static const double ARBufferBudget = 600.0 * 1024 * 1024;
+static const int ARMaxBoxes = 256;
 
 /// 等待写入的一帧（像素已复制，不占用截屏队列的缓冲区）。
 @interface ARPendingFrame : NSObject {
@@ -14,6 +21,7 @@ static NSError *ARRecordError(NSString *message) {
     CVPixelBufferRef pixels;
     CMTime pts;
     double time;
+    long motionId;
 }
 @end
 
@@ -32,12 +40,16 @@ static NSError *ARRecordError(NSString *message) {
 @property (nonatomic, strong, nullable) AVAssetWriterInput *input;
 @property (nonatomic, strong, nullable) AVAssetWriterInputPixelBufferAdaptor *adaptor;
 @property (nonatomic) CVPixelBufferPoolRef copyPool;
-@property (nonatomic, strong) NSMutableArray<ARPendingFrame *> *pending; // 帧队列上访问
-@property (nonatomic) BOOL recognizing;                                  // 帧队列上访问
-@property (nonatomic) double lastRecognitionTime;                        // 帧队列上访问
-@property (nonatomic) double newestFrameTime;                            // 帧队列上访问
-@property (nonatomic) BOOL sessionStarted;                               // 帧队列上访问
-@property (nonatomic) NSUInteger droppedFrames;                          // 帧队列上访问
+// 以下只在帧队列上访问。
+@property (nonatomic) ARMotionSession *motion;
+/// 每次开始递增；丢弃上一次运行还没完成的识别结果。
+@property (nonatomic) NSUInteger generation;
+@property (nonatomic, strong) NSMutableArray<ARPendingFrame *> *pending;
+@property (nonatomic) NSUInteger maxPending;
+@property (nonatomic) BOOL recognizing;
+@property (nonatomic) double lastRecognitionTime;
+@property (nonatomic) BOOL sessionStarted;
+@property (nonatomic) NSUInteger droppedFrames;
 @property (nonatomic, readwrite) NSUInteger currentCount;
 @property (nonatomic, readwrite, getter=isRunning) BOOL running;
 @property (nonatomic, readwrite, nullable) NSDate *startedAt;
@@ -62,6 +74,7 @@ static NSError *ARRecordError(NSString *message) {
 
 - (void)dealloc {
     if (_copyPool) CVPixelBufferPoolRelease(_copyPool);
+    if (_motion) ARMotionDestroy(_motion);
 }
 
 - (void)startDisplay:(CGDirectDisplayID)displayID maxWidth:(NSInteger)maxWidth fps:(NSInteger)fps showsCursor:(BOOL)showsCursor
@@ -139,12 +152,22 @@ static NSError *ARRecordError(NSString *message) {
     self.writer = writer;
     self.input = input;
     self.adaptor = adaptor;
-    [AREngine resetTrackerWidth:size.width height:size.height padding:MAX(6, size.height / 150) hold:0.5];
+
+    // 缓存帧数：覆盖“等待之后的识别 + 识别间隔 + 识别耗时”，同时不超过内存上限。
+    double frameBytes = size.width * size.height * 4;
+    NSUInteger wanted = (NSUInteger)ceil(fps * (ARReadyDelay + 1.0 / MAX(self.recognitionsPerSecond, 0.5) + 0.5)) + 4;
+    NSUInteger affordable = (NSUInteger)MAX(8.0, floor(ARBufferBudget / MAX(frameBytes, 1)));
+    NSUInteger maxPending = MIN(wanted, affordable);
+    int factor = size.width > 1280 ? 2 : 1;
+    ARMotionSession *motion = ARMotionCreate((int)size.width, (int)size.height, factor, MAX(6, size.height / 150), 0.6);
     dispatch_sync(self.capture.frameQueue, ^{
+        if (self.motion) ARMotionDestroy(self.motion);
+        self.motion = motion;
+        self.maxPending = maxPending;
+        self.generation++;
         [self.pending removeAllObjects];
         self.recognizing = NO;
         self.lastRecognitionTime = -INFINITY;
-        self.newestFrameTime = -INFINITY;
         self.sessionStarted = NO;
         self.droppedFrames = 0;
     });
@@ -159,9 +182,9 @@ static NSError *ARRecordError(NSString *message) {
 
 #pragma mark - 帧处理（帧队列）
 
-static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolRef pool) {
+static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolRef pool, NSUInteger threshold) {
     CVPixelBufferRef copy = NULL;
-    NSDictionary *aux = @{(id)kCVPixelBufferPoolAllocationThresholdKey: @24};
+    NSDictionary *aux = @{(id)kCVPixelBufferPoolAllocationThresholdKey: @(threshold)};
     if (CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, (__bridge CFDictionaryRef)aux, &copy) != kCVReturnSuccess) {
         return NULL;
     }
@@ -179,10 +202,11 @@ static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolR
 }
 
 - (void)handleFrame:(CVPixelBufferRef)pixels pts:(CMTime)pts time:(double)time {
-    if (!self.copyPool) return;
-    CVPixelBufferRef copy = ARCopyPixels(pixels, self.copyPool);
+    if (!self.copyPool || !self.motion) return;
+    // 缓存已满：先用目前的追踪结果写出最早的帧（它们已被逐帧追踪遮住），而不是丢掉新画面。
+    if (self.pending.count + 2 >= self.maxPending) [self drainCount:self.pending.count + 2 - self.maxPending + 1];
+    CVPixelBufferRef copy = ARCopyPixels(pixels, self.copyPool, self.maxPending + 2);
     if (!copy) {
-        // 缓冲区用完（识别太慢），丢弃这一帧，宁可少一帧也不写未打码的画面。
         self.droppedFrames++;
         return;
     }
@@ -190,43 +214,67 @@ static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolR
     frame->pixels = copy;
     frame->pts = pts;
     frame->time = time;
+    CVPixelBufferLockBaseAddress(copy, kCVPixelBufferLock_ReadOnly);
+    frame->motionId = ARMotionAddFrame(self.motion, CVPixelBufferGetBaseAddress(copy), (int)CVPixelBufferGetBytesPerRow(copy), time);
+    CVPixelBufferUnlockBaseAddress(copy, kCVPixelBufferLock_ReadOnly);
     [self.pending addObject:frame];
-    self.newestFrameTime = time;
 
     double interval = 1.0 / MAX(self.recognitionsPerSecond, 0.5);
-    if (!self.recognizing && time - self.lastRecognitionTime >= interval) {
-        [self recognizeFrame:frame];
-    }
-    [self drainForce:NO];
+    if (!self.recognizing && time - self.lastRecognitionTime >= interval) [self recognizeFrame:frame];
+    [self drainReady];
 }
 
 - (void)recognizeFrame:(ARPendingFrame *)frame {
     self.recognizing = YES;
     self.lastRecognitionTime = frame->time;
     CVPixelBufferRef pixels = CVPixelBufferRetain(frame->pixels);
-    double time = frame->time;
+    long motionId = frame->motionId;
+    NSUInteger generation = self.generation;
     dispatch_async(self.recognizeQueue, ^{
         NSArray<ARDetection *> *detections = [self.recognizer detectionsInPixelBuffer:pixels];
         CVPixelBufferRelease(pixels);
         dispatch_async(self.capture.frameQueue, ^{
-            [AREngine addDetections:detections atTime:time];
+            if (generation != self.generation) return;
+            [self addDetections:detections frame:motionId];
             self.recognizing = NO;
             dispatch_async(dispatch_get_main_queue(), ^{ self.currentCount = detections.count; });
-            [self drainForce:NO];
+            [self drainReady];
         });
     });
 }
 
-/// 写入已经可以确定打码区域的帧。force 为 YES 时写入全部（结束时使用）。
-- (void)drainForce:(BOOL)force {
-    double latest = [AREngine latestTime];
-    while (self.pending.count) {
-        ARPendingFrame *frame = self.pending.firstObject;
-        // 之后已有识别结果才写入；识别严重滞后（超过 2 秒）时也写入，使用最近的结果并保持遮挡。
-        if (!force && latest < frame->time && self.newestFrameTime - frame->time < 2.0) break;
-        [self.pending removeObjectAtIndex:0];
-        [self writeFrame:frame];
+- (void)addDetections:(NSArray<ARDetection *> *)detections frame:(long)motionId {
+    if (!self.motion) return;
+    NSUInteger n = detections.count;
+    ARBox *boxes = calloc(MAX(n, 1), sizeof(ARBox));
+    uint32_t *keys = calloc(MAX(n, 1), sizeof(uint32_t));
+    for (NSUInteger i = 0; i < n; i++) {
+        NSRect r = detections[i].rect;
+        boxes[i] = (ARBox){r.origin.x, r.origin.y, r.size.width, r.size.height};
+        keys[i] = detections[i].key;
     }
+    ARMotionAddDetections(self.motion, motionId, boxes, keys, (int)n);
+    free(boxes);
+    free(keys);
+}
+
+/// 写入已经确定打码区域的帧。
+- (void)drainReady {
+    if (!self.motion) return;
+    while (self.pending.count && ARMotionFrameReady(self.motion, self.pending.firstObject->motionId, ARReadyDelay)) {
+        [self writeOldest];
+    }
+}
+
+- (void)drainCount:(NSUInteger)count {
+    for (NSUInteger i = 0; i < count && self.pending.count; i++) [self writeOldest];
+}
+
+- (void)writeOldest {
+    ARPendingFrame *frame = self.pending.firstObject;
+    [self.pending removeObjectAtIndex:0];
+    [self writeFrame:frame];
+    ARMotionRelease(self.motion, frame->motionId + 1);
 }
 
 - (void)writeFrame:(ARPendingFrame *)frame {
@@ -247,8 +295,11 @@ static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolR
         self.droppedFrames++;
         return;
     }
-    NSArray<NSValue *> *boxes = [AREngine boxesAtTime:frame->time];
-    CIImage *image = ARRedactImage([CIImage imageWithCVPixelBuffer:frame->pixels], boxes, self.style);
+    ARBox boxes[ARMaxBoxes];
+    int n = ARMotionBoxesForFrame(self.motion, frame->motionId, boxes, ARMaxBoxes);
+    NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:(NSUInteger)n];
+    for (int i = 0; i < n; i++) [rects addObject:[NSValue valueWithRect:NSMakeRect(boxes[i].x, boxes[i].y, boxes[i].w, boxes[i].h)]];
+    CIImage *image = ARRedactImage([CIImage imageWithCVPixelBuffer:frame->pixels], rects, self.style);
     [self.ciContext render:image toCVPixelBuffer:output];
     [adaptor appendPixelBuffer:output withPresentationTime:frame->pts];
     CVPixelBufferRelease(output);
@@ -264,12 +315,11 @@ static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolR
     self.running = NO;
     NSURL *url = self.outputURL;
     [self.capture stopWithCompletion:^{
-        // 帧队列：对最后一帧再识别一次，保证结尾的帧也有“之后”的结果，然后全部写完。
+        // 帧队列：等正在进行的识别完成，再对最后一帧识别一次，让结尾的帧也有之后的结果，然后全部写完。
+        dispatch_sync(self.recognizeQueue, ^{});
         ARPendingFrame *last = self.pending.lastObject;
-        if (last) {
-            [AREngine addDetections:[self.recognizer detectionsInPixelBuffer:last->pixels] atTime:last->time];
-        }
-        [self drainForce:YES];
+        if (last) [self addDetections:[self.recognizer detectionsInPixelBuffer:last->pixels] frame:last->motionId];
+        [self drainCount:self.pending.count];
         AVAssetWriter *writer = self.writer;
         BOOL started = self.sessionStarted;
         void (^finish)(NSURL *, NSError *) = ^(NSURL *savedURL, NSError *error) {
@@ -280,6 +330,10 @@ static CVPixelBufferRef ARCopyPixels(CVPixelBufferRef source, CVPixelBufferPoolR
                 completion(savedURL, error);
             });
         };
+        if (self.motion) {
+            ARMotionDestroy(self.motion);
+            self.motion = NULL;
+        }
         if (!writer || !started) {
             [writer cancelWriting];
             [NSFileManager.defaultManager removeItemAtURL:url error:NULL];

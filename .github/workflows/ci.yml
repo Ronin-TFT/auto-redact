@@ -23,6 +23,12 @@ jobs:
           go build -buildmode=c-archive -o build/libredact.a .
           cc -Wall -Werror -I build tests/bridge_test.c build/libredact.a -lpthread -o build/bridge-test
           build/bridge-test
+      - name: Motion tracking tests
+        run: |
+          cc -O2 -Wall -Werror -I mac tests/motion_test.c mac/ARMotion.c -lm -o build/motion-test
+          build/motion-test
+          cc -O2 -I mac tests/motion_bench.c mac/ARMotion.c -lm -o build/motion-bench
+          build/motion-bench
 
   macos:
     name: Mac app
@@ -38,7 +44,7 @@ jobs:
         run: |
           mkdir -p build
           go build -buildmode=c-archive -o build/libredact.a .
-          clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) build/libredact.a \
+          clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) mac/ARMotion.c build/libredact.a \
             -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
             -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test
           build/mac-test

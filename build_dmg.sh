@@ -30,7 +30,7 @@ lipo -create "$BUILD/lib/arm64/libredact.a" "$BUILD/lib/amd64/libredact.a" -outp
 cp "$BUILD/lib/arm64/libredact.h" "$BUILD/lib/libredact.h"
 
 clang -arch arm64 -arch x86_64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET -fobjc-arc -O2 -Wall \
-  -I "$BUILD/lib" mac/*.m "$BUILD/lib/libredact.a" -o "$APP/Contents/MacOS/AutoRedact" \
+  -I "$BUILD/lib" mac/*.m mac/*.c "$BUILD/lib/libredact.a" -o "$APP/Contents/MacOS/AutoRedact" \
   -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia \
   -framework CoreVideo -framework CoreImage -framework Vision -framework CoreFoundation
 lipo -info "$APP/Contents/MacOS/AutoRedact"

@@ -1,5 +1,4 @@
 #import "AREngine.h"
-#import "ARRecognizer.h"
 #import "libredact.h"
 
 static id ARJSON(char *raw) {
@@ -44,52 +43,6 @@ static NSString *ARJSONString(id object) {
             }
         }
         [out addObject:line];
-    }
-    return out;
-}
-
-+ (void)resetTrackerWidth:(double)width height:(double)height padding:(double)padding hold:(double)hold {
-    ARTrackReset(width, height, padding, hold);
-}
-
-+ (void)addBoxes:(NSArray<NSValue *> *)rects atTime:(double)time {
-    NSMutableArray *raw = [NSMutableArray arrayWithCapacity:rects.count];
-    for (NSValue *value in rects) {
-        NSRect r = value.rectValue;
-        [raw addObject:@[@(r.origin.x), @(r.origin.y), @(r.size.width), @(r.size.height)]];
-    }
-    ARTrackAdd(time, (char *)ARJSONString(raw).UTF8String);
-}
-
-+ (void)addDetections:(NSArray<ARDetection *> *)detections atTime:(double)time {
-    NSMutableArray *raw = [NSMutableArray arrayWithCapacity:detections.count];
-    for (ARDetection *d in detections) {
-        NSRect r = d.rect;
-        [raw addObject:@[@(r.origin.x), @(r.origin.y), @(r.size.width), @(r.size.height), @(d.key)]];
-    }
-    ARTrackAdd(time, (char *)ARJSONString(raw).UTF8String);
-}
-
-+ (double)latestTime {
-    double latest = ARTrackLatest();
-    return latest < -1e299 ? -INFINITY : latest;
-}
-
-+ (NSArray<NSValue *> *)boxesAtTime:(double)time {
-    return [self rectsFromJSON:ARJSON(ARTrackBoxes(time))];
-}
-
-+ (NSArray<NSValue *> *)boxesAtTime:(double)time ahead:(double)ahead {
-    return [self rectsFromJSON:ARJSON(ARTrackBoxesAhead(time, ahead))];
-}
-
-+ (NSArray<NSValue *> *)rectsFromJSON:(NSArray *)raw {
-    NSMutableArray *out = [NSMutableArray array];
-    if (![raw isKindOfClass:NSArray.class]) return out;
-    for (NSArray *r in raw) {
-        if ([r isKindOfClass:NSArray.class] && r.count == 4) {
-            [out addObject:[NSValue valueWithRect:NSMakeRect([r[0] doubleValue], [r[1] doubleValue], [r[2] doubleValue], [r[3] doubleValue])]];
-        }
     }
     return out;
 }

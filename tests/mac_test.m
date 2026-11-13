@@ -1,7 +1,7 @@
 // 原生部分的回归测试：坐标换算、引擎封装、打码渲染，以及用 Vision 真实识别合成图片中的手机号和邮箱。
 // 构建运行（需先编译静态库）：
 //   go build -buildmode=c-archive -o build/libredact.a .
-//   clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) build/libredact.a \
+//   clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) mac/ARMotion.c build/libredact.a \
 //     -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
 //     -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test && build/mac-test
 #import <Cocoa/Cocoa.h>
@@ -56,9 +56,6 @@ int main(void) {
         assert(near(approx.origin.x * 100, 30) && near(approx.size.width * 100, 40));
         CGRect wide = ARApproximateRangeBox(CGRectMake(0, 0, 1, 0.1), @"电话ab", NSMakeRange(2, 2));
         assert(near(wide.origin.x * 100, 50) && near(wide.size.width * 100, 50));
-        NSArray *scrolls = @[@[@1.0, @5, @-20], @[@2.0, @-3, @40], @[@3.0, @0, @-10]];
-        NSSize scrolled = ARScrollSince(scrolls, 1.5);
-        assert(near(scrolled.width, 3) && near(scrolled.height, 50));
         assert(ARTextKey(@"13800138000") == ARTextKey(@"13800138000") && ARTextKey(@"a") != ARTextKey(@"b") && ARTextKey(@"") != 0);
         NSArray *words = ARSplitKeywords(@" 张三，李四, 张三\n项目 X ");
         assert([words isEqualToArray:(@[@"张三", @"李四", @"项目 X"])]);
@@ -71,12 +68,6 @@ int main(void) {
         NSArray *found = [AREngine findInLines:@[@"张三 13800138000", @"无"]];
         assert(found.count == 2 && [found[0] count] == 2 && [found[1] count] == 0);
         assert(NSEqualRanges([found[0][1][@"range"] rangeValue], NSMakeRange(3, 11)));
-        [AREngine resetTrackerWidth:1000 height:800 padding:0 hold:0.5];
-        assert(isinf([AREngine latestTime]));
-        [AREngine addBoxes:@[[NSValue valueWithRect:NSMakeRect(10, 20, 30, 40)]] atTime:1.5];
-        assert([AREngine latestTime] == 1.5);
-        NSArray<NSValue *> *boxes = [AREngine boxesAtTime:1.6];
-        assert(boxes.count == 1 && NSEqualRects(boxes[0].rectValue, NSMakeRect(10, 20, 30, 40)));
 
         // 打码渲染：框内像素改变，框外不变
         CVPixelBufferRef base = renderText(@"13800138000", 800, 200, 60);

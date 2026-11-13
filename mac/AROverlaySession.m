@@ -1,23 +1,15 @@
 #import "AROverlaySession.h"
 #import "ARCapture.h"
-#import "AREngine.h"
+#import "ARMotion.h"
 #import "ARRecognizer.h"
-#import <CoreMedia/CoreMedia.h>
 
-NSSize ARScrollSince(NSArray<NSArray<NSNumber *> *> *events, double since) {
-    double dx = 0, dy = 0;
-    for (NSArray<NSNumber *> *e in events) {
-        if (e.count == 3 && e[0].doubleValue > since) {
-            dx += fabs(e[1].doubleValue);
-            dy += fabs(e[2].doubleValue);
-        }
-    }
-    return NSMakeSize(dx, dy);
-}
-
-static double ARHostNow(void) {
-    return CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()));
-}
+/// 追踪用的画面帧率；遮挡块每一帧都会更新位置。
+static const NSInteger ARTrackingFPS = 30;
+/// 保留最近的画面帧数，用于识别结果出来后从那一帧追踪到当前。
+static const long ARKeepFrames = 24;
+/// 画面到屏幕上显示遮挡的延迟（帧），按速度提前覆盖。
+static const double ARLatencyFrames = 2;
+static const int ARMaxBoxes = 256;
 
 NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
     CGFloat sx = screen.size.width / MAX(pixelSize.width, 1), sy = screen.size.height / MAX(pixelSize.height, 1);
@@ -49,15 +41,12 @@ NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
 @property (nonatomic, strong) dispatch_queue_t recognizeQueue;
 @property (nonatomic, strong) NSMutableArray<NSWindow *> *covers;
 @property (nonatomic) NSRect screenFrame;
-/// 最近一次识别得到的遮挡位置（屏幕坐标），以及对应画面的时间。
-@property (nonatomic, strong) NSArray<NSValue *> *baseFrames;
-@property (nonatomic) double baseTime;
-/// 最近的滚动事件 [时间, |dx|, |dy|]（主线程访问）。
-@property (nonatomic, strong) NSMutableArray<NSArray<NSNumber *> *> *scrollEvents;
-@property (nonatomic, strong, nullable) id globalScrollMonitor;
-@property (nonatomic, strong, nullable) id localScrollMonitor;
-@property (nonatomic) BOOL recognizing;           // 帧队列上访问
-@property (nonatomic) double lastRecognitionTime; // 帧队列上访问
+// 以下只在帧队列上访问。
+@property (nonatomic) ARMotionSession *motion;
+/// 每次开始递增；丢弃上一次运行还没完成的识别结果。
+@property (nonatomic) NSUInteger generation;
+@property (nonatomic) BOOL recognizing;
+@property (nonatomic) double lastRecognitionTime;
 @property (nonatomic, readwrite) NSUInteger currentCount;
 @property (nonatomic, readwrite, getter=isRunning) BOOL running;
 @end
@@ -70,8 +59,6 @@ NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
         _recognizer = [ARRecognizer new];
         _recognizeQueue = dispatch_queue_create("AutoRedact.OverlayRecognize", DISPATCH_QUEUE_SERIAL);
         _covers = [NSMutableArray array];
-        _baseFrames = @[];
-        _scrollEvents = [NSMutableArray array];
         _recognitionsPerSecond = 5;
         __weak AROverlaySession *weakSelf = self;
         _capture.stoppedHandler = ^(NSError *error) {
@@ -84,6 +71,10 @@ NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
     return self;
 }
 
+- (void)dealloc {
+    if (_motion) ARMotionDestroy(_motion);
+}
+
 - (void)startDisplay:(CGDirectDisplayID)displayID screenFrame:(NSRect)screenFrame completion:(void (^)(NSError *))completion {
     if (self.running) {
         completion(nil);
@@ -91,11 +82,15 @@ NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
     }
     self.recognizer.recognizesChinese = self.recognizesChinese;
     self.screenFrame = screenFrame;
-    // 只用于识别，不需要原始分辨率。
-    [self.capture startDisplay:displayID maxWidth:2048 fps:10 showsCursor:NO
+    // 只用于识别与追踪，不需要原始分辨率。
+    [self.capture startDisplay:displayID maxWidth:1920 fps:ARTrackingFPS showsCursor:NO
                        prepare:^BOOL(CGSize size, NSError **error) {
-        [AREngine resetTrackerWidth:size.width height:size.height padding:MAX(6, size.height / 150) hold:0.6];
+        ARMotionSession *motion = ARMotionCreate((int)size.width, (int)size.height, size.width > 1280 ? 2 : 1,
+                                                 MAX(6, size.height / 150), 0.6);
         dispatch_sync(self.capture.frameQueue, ^{
+            if (self.motion) ARMotionDestroy(self.motion);
+            self.motion = motion;
+            self.generation++;
             self.recognizing = NO;
             self.lastRecognitionTime = -INFINITY;
         });
@@ -103,58 +98,66 @@ NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
     } frameHandler:^(CMSampleBufferRef sample, CVPixelBufferRef pixels, double time) {
         [self handleFrame:pixels time:time];
     } completion:^(NSError *error) {
-        if (!error) {
-            self.running = YES;
-            [self installScrollMonitors];
-        }
+        if (!error) self.running = YES;
         completion(error);
     }];
 }
 
-// 一检测到滚动就把遮挡块沿滚动方向扩大，不等下一次识别。
-- (void)installScrollMonitors {
-    __weak AROverlaySession *weakSelf = self;
-    void (^record)(NSEvent *) = ^(NSEvent *event) {
-        AROverlaySession *strongSelf = weakSelf;
-        if (!strongSelf.running) return;
-        double scale = event.hasPreciseScrollingDeltas ? 1.0 : 12.0;
-        [strongSelf.scrollEvents addObject:@[@(event.timestamp), @(event.scrollingDeltaX * scale), @(event.scrollingDeltaY * scale)]];
-        [strongSelf layoutCovers];
-    };
-    self.globalScrollMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:record];
-    self.localScrollMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent *(NSEvent *event) {
-        record(event);
-        return event;
-    }];
-}
-
-- (void)removeScrollMonitors {
-    if (self.globalScrollMonitor) [NSEvent removeMonitor:self.globalScrollMonitor];
-    if (self.localScrollMonitor) [NSEvent removeMonitor:self.localScrollMonitor];
-    self.globalScrollMonitor = nil;
-    self.localScrollMonitor = nil;
-    [self.scrollEvents removeAllObjects];
-}
+#pragma mark - 帧处理（帧队列）
 
 - (void)handleFrame:(CVPixelBufferRef)pixels time:(double)time {
+    if (!self.motion) return;
+    CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
+    long frameId = ARMotionAddFrame(self.motion, CVPixelBufferGetBaseAddress(pixels), (int)CVPixelBufferGetBytesPerRow(pixels), time);
+    CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
+    ARMotionRelease(self.motion, frameId - ARKeepFrames);
+
     double interval = 1.0 / MAX(self.recognitionsPerSecond, 0.5);
-    if (self.recognizing || time - self.lastRecognitionTime < interval) return;
-    self.recognizing = YES;
-    self.lastRecognitionTime = time;
-    CVPixelBufferRetain(pixels);
-    dispatch_async(self.recognizeQueue, ^{
-        NSArray<ARDetection *> *detections = [self.recognizer detectionsInPixelBuffer:pixels];
-        CVPixelBufferRelease(pixels);
-        dispatch_async(self.capture.frameQueue, ^{
-            [AREngine addDetections:detections atTime:time];
-            // 从画面时间到下一次更新前，按滚动速度预测文字会经过的位置。
-            double ahead = MAX(0, ARHostNow() - time) + 1.0 / MAX(self.recognitionsPerSecond, 0.5) + 0.1;
-            NSArray<NSValue *> *boxes = [AREngine boxesAtTime:time ahead:ahead];
-            self.recognizing = NO;
-            dispatch_async(dispatch_get_main_queue(), ^{ [self showBoxes:boxes frameTime:time]; });
+    if (!self.recognizing && time - self.lastRecognitionTime >= interval) {
+        self.recognizing = YES;
+        self.lastRecognitionTime = time;
+        CVPixelBufferRetain(pixels);
+        NSUInteger generation = self.generation;
+        dispatch_async(self.recognizeQueue, ^{
+            NSArray<ARDetection *> *detections = [self.recognizer detectionsInPixelBuffer:pixels];
+            CVPixelBufferRelease(pixels);
+            dispatch_async(self.capture.frameQueue, ^{
+                if (generation != self.generation) return;
+                [self addDetections:detections frame:frameId];
+                self.recognizing = NO;
+                [self publishBoxes];
+            });
         });
-    });
+    }
+    [self publishBoxes];
 }
+
+- (void)addDetections:(NSArray<ARDetection *> *)detections frame:(long)frameId {
+    if (!self.motion) return;
+    NSUInteger n = detections.count;
+    ARBox *boxes = calloc(MAX(n, 1), sizeof(ARBox));
+    uint32_t *keys = calloc(MAX(n, 1), sizeof(uint32_t));
+    for (NSUInteger i = 0; i < n; i++) {
+        NSRect r = detections[i].rect;
+        boxes[i] = (ARBox){r.origin.x, r.origin.y, r.size.width, r.size.height};
+        keys[i] = detections[i].key;
+    }
+    ARMotionAddDetections(self.motion, frameId, boxes, keys, (int)n);
+    free(boxes);
+    free(keys);
+}
+
+/// 当前位置加上之后几帧按速度会经过的位置（抵消画面到屏幕显示的延迟）。
+- (void)publishBoxes {
+    if (!self.motion) return;
+    ARBox boxes[ARMaxBoxes];
+    int n = ARMotionPredictedBoxes(self.motion, ARLatencyFrames, boxes, ARMaxBoxes);
+    NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:(NSUInteger)n];
+    for (int i = 0; i < n; i++) [rects addObject:[NSValue valueWithRect:NSMakeRect(boxes[i].x, boxes[i].y, boxes[i].w, boxes[i].h)]];
+    dispatch_async(dispatch_get_main_queue(), ^{ [self showBoxes:rects]; });
+}
+
+#pragma mark - 遮挡窗口（主线程）
 
 - (NSWindow *)newCoverWindow {
     NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 10, 10) styleMask:NSWindowStyleMaskBorderless
@@ -171,47 +174,35 @@ NSRect ARScreenRectFromPixelRect(NSRect r, CGSize pixelSize, NSRect screen) {
     return window;
 }
 
-- (void)showBoxes:(NSArray<NSValue *> *)boxes frameTime:(double)frameTime {
+- (void)showBoxes:(NSArray<NSValue *> *)boxes {
     if (!self.running) return;
     CGSize pixelSize = self.capture.pixelSize;
-    NSMutableArray<NSValue *> *frames = [NSMutableArray arrayWithCapacity:boxes.count];
-    for (NSValue *box in boxes) {
-        [frames addObject:[NSValue valueWithRect:ARScreenRectFromPixelRect(box.rectValue, pixelSize, self.screenFrame)]];
-    }
-    self.baseFrames = frames;
-    self.baseTime = frameTime;
-    // 识别所用画面之前的滚动已经反映在结果里，只保留之后的。
-    NSIndexSet *old = [self.scrollEvents indexesOfObjectsPassingTest:^BOOL(NSArray<NSNumber *> *e, NSUInteger idx, BOOL *stop) {
-        return e[0].doubleValue <= frameTime - 1.0;
-    }];
-    [self.scrollEvents removeObjectsAtIndexes:old];
-    [self layoutCovers];
-    self.currentCount = boxes.count;
-    if (self.updateHandler) self.updateHandler(boxes.count);
-}
-
-/// 按识别结果放置遮挡块；画面之后发生的滚动，让遮挡块向两个方向扩大相应距离。
-- (void)layoutCovers {
-    NSSize scroll = ARScrollSince(self.scrollEvents, self.baseTime);
-    NSArray<NSValue *> *frames = self.baseFrames;
-    while (self.covers.count < frames.count) [self.covers addObject:[self newCoverWindow]];
+    while (self.covers.count < boxes.count) [self.covers addObject:[self newCoverWindow]];
     for (NSUInteger i = 0; i < self.covers.count; i++) {
         NSWindow *cover = self.covers[i];
-        if (i < frames.count) {
-            NSRect frame = NSInsetRect(frames[i].rectValue, -scroll.width, -scroll.height);
-            [cover setFrame:NSIntersectionRect(frame, self.screenFrame) display:YES];
-            [cover orderFrontRegardless];
-        } else {
+        if (i < boxes.count) {
+            NSRect frame = NSIntersectionRect(ARScreenRectFromPixelRect(boxes[i].rectValue, pixelSize, self.screenFrame), self.screenFrame);
+            if (!NSEqualRects(cover.frame, frame)) [cover setFrame:frame display:YES];
+            if (!cover.isVisible) [cover orderFrontRegardless];
+        } else if (cover.isVisible) {
             [cover orderOut:nil];
         }
+    }
+    if (self.currentCount != boxes.count) {
+        self.currentCount = boxes.count;
+        if (self.updateHandler) self.updateHandler(boxes.count);
     }
 }
 
 - (void)stop {
     self.running = NO;
-    [self removeScrollMonitors];
-    self.baseFrames = @[];
-    [self.capture stopWithCompletion:^{}];
+    [self.capture stopWithCompletion:^{
+        // 帧队列：此后不会再有新帧。
+        if (self.motion) {
+            ARMotionDestroy(self.motion);
+            self.motion = NULL;
+        }
+    }];
     for (NSWindow *cover in self.covers) [cover orderOut:nil];
     self.currentCount = 0;
 }

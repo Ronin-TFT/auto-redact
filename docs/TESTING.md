@@ -29,22 +29,26 @@
 在项目目录运行：
 
 ```sh
-# 1）识别规则、跟踪逻辑、样例文件（任意平台）
+# 1）识别规则、样例文件（任意平台）
 go test ./...
+
+# 1b）逐帧追踪：合成滚动画面（任意平台）
+mkdir -p build && cc -O2 -I mac tests/motion_test.c mac/ARMotion.c -lm -o build/motion-test && build/motion-test
 
 # 2）C 接口
 mkdir -p build && go build -buildmode=c-archive -o build/libredact.a .
 cc -I build tests/bridge_test.c build/libredact.a -framework CoreFoundation -o build/bridge-test && build/bridge-test
 
 # 3）原生部分：坐标换算、打码渲染、Vision 真实识别
-clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) build/libredact.a \
+clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) mac/ARMotion.c build/libredact.a \
   -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test && build/mac-test
 ```
 
 | 编号 | 测试 | 预期输出 | 结果 |
 |---|---|---|---|
-| A1 | `go test ./...` | `internal/detect`、`internal/track` 均为 `ok` | ☐ |
+| A1 | `go test ./...` | `internal/detect` 为 `ok` | ☐ |
+| A1b | 逐帧追踪测试 | 9 个场景全部 ✅，末尾 `all passed`；每个场景“漏遮 0 处”，遮挡面积约为文字的 1.0–1.1 倍 | ☐ |
 | A2 | C 接口 | `bridge configure, find and track passed` | ☐ |
 | A3 | 原生测试 | `recognized 2 sensitive items` 和 `geometry, engine, redaction rendering and Vision recognition passed` | ☐ |
 | A4 | 打包 `./build_dmg.sh` | `lipo -info` 显示 `x86_64 arm64`，最后一行为 `dist/AutoRedact.dmg` | ☐ |
@@ -52,7 +56,7 @@ clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m)
 自动测试覆盖的内容：
 
 - **识别规则**：手机号（含空格、+86、国际号码、OCR 把 0 认成 O）、邮箱、身份证（出生日期和校验位）、银行卡（Luhn）、各家 API 密钥、密码和验证码字段、IP、自定义关键词、中文和 emoji 的 UTF-16 位置；以及不该误伤的订单号、版本号、时间戳。
-- **跟踪逻辑**：文字每秒滚动 1000 像素时 60 帧全部被遮住；两次识别之间新出现的文字提前遮住；识别漏掉一次时打码框保留；不相关的框不合并；扩边、裁剪、合并；历史清理。
+- **逐帧追踪**：程序生成类似文字的滚动画面，模拟“每 6 帧识别一次、识别耗时 3 帧”，像 App 一样边录边写、写入时逐帧检查：静止、每秒 1500 / 2700 像素快速滚动、加速减速、来回滚动、非整数速度、识别漏掉一次、识别很慢，全部零漏遮，遮挡面积约为文字的 1.0–1.1 倍；实时遮挡按速度预测零漏遮。“从未完整出现、无法识别的半截文字”单独统计。
 - **原生部分**：坐标换算；三种打码样式确实改变了像素；对合成图片做真实 Vision 识别，找到 1 个手机号、1 个邮箱，位置正确。
 
 ---
@@ -93,7 +97,7 @@ clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m)
 |---|---|---|---|---|
 | R1 | 静态画面 | 显示样例文件“应该被打码”部分，录 10 秒 | 所有敏感值全程被遮；“联系人：”“邮箱：”等标签文字不被遮 | ☐ |
 | R2 | 慢速滚动 | 在“滚动测试”部分用触控板慢慢滚动 15 秒 | 每帧都遮住；打码框随文字移动，不闪烁 | ☐ |
-| R3 | **快速滚动** | 在“滚动测试”部分（多处同样格式的邮箱）快速上下滚动 15 秒 | 逐帧检查无露出；滚动中遮挡范围会变大，停下后恢复（正常） | ☐ |
+| R3 | **快速滚动** | 在“滚动测试”部分（多处同样格式的邮箱）快速上下滚动 15 秒 | 逐帧检查无露出；遮挡块紧贴文字移动，不明显放大 | ☐ |
 | R4 | 新出现的内容 | 录制中在文本编辑里粘贴一行 `手机 13900139000` | 粘贴后**第一帧**就被遮住 | ☐ |
 | R5 | 切换窗口 | 录制中在样例窗口和其他窗口之间来回切换 | 切回时的第一帧即被遮住 | ☐ |
 | R6 | 打码样式 | 分别用马赛克、模糊、色块各录 5 秒 | 三种样式都无法辨认原文 | ☐ |
@@ -117,7 +121,7 @@ clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m)
 | O1 | 基本遮挡 | 模式选“屏幕遮挡”，开始；显示样例文件 | 敏感值上出现深色“已隐藏”遮挡块，位置与文字吻合 | ☐ |
 | O2 | 点击穿透 | 在遮挡块上点击、选中文字 | 操作直接作用于下方窗口 | ☐ |
 | O3 | 不闪烁 | 静止观察 30 秒 | 遮挡块稳定，不反复出现、消失 | ☐ |
-| O4 | 滚动 | 用触控板或鼠标滚轮滚动样例文件 | 一开始滚动，遮挡块立即沿滚动方向拉长；停下后约 0.2 秒内缩回贴合文字。拖动滚动条或按键翻页时没有滚动事件，新内容可能短暂露出（记录实际观察） | ☐ |
+| O4 | 滚动 | 快速、慢速、来回滚动样例文件（触控板、滚轮、拖滚动条都试） | 已识别的内容在滚动中遮挡块紧贴文字移动，不拖后、不放大；从未识别过的新内容在约 0.2 秒内被遮住（记录实际观察） | ☐ |
 | O5 | 会议共享 | 在 Zoom 或腾讯会议中共享整个屏幕，用另一台设备入会观看 | 对方看到的是遮挡块，看不到原文 | ☐ |
 | O6 | 停止 | 点“停止” | 所有遮挡块立即消失 | ☐ |
 | O7 | 全屏应用 | 把样例文件窗口切到全屏 | 遮挡块在全屏空间中仍然显示 | ☐ |

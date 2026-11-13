@@ -7,8 +7,8 @@
 
 | 模式 | 用途 | 效果 |
 |---|---|---|
-| **录屏并打码** | 录教程、录演示 | 输出 MP4，**每一帧都已打码**。画面比实时晚约半秒写入：每帧都等它之后的一次识别完成，再用前后两次识别结果打码，文字移动经过的区域也会遮住。 |
-| **屏幕遮挡** | Zoom、腾讯会议等共享屏幕 | 在敏感信息上方盖深色遮挡块，对方和你自己都会看到遮挡。滚动时遮挡块立即沿滚动方向拉长，并按滚动速度预测文字位置；新出现的内容在下一次识别前（约 0.2 秒）仍可能短暂露出。 |
+| **录屏并打码** | 录教程、录演示 | 输出 MP4，**每一帧都已打码**。文字识别每秒几次，两次之间逐帧追踪画面移动，遮挡紧贴文字；画面比实时晚约半秒写入，新识别到的内容会沿缓存的画面往回追踪，补上它之前每一帧（包括刚滚进画面时）的位置。 |
+| **屏幕遮挡** | Zoom、腾讯会议等共享屏幕 | 在敏感信息上方盖深色遮挡块，对方和你自己都会看到遮挡。每秒 30 次逐帧追踪画面移动，遮挡块跟着文字走，并按滚动速度提前覆盖；从未识别过的新内容在下一次识别前（约 0.2 秒）仍可能短暂露出。 |
 
 ## 能识别的内容
 
@@ -40,12 +40,15 @@ open dist/AutoRedact.dmg
 完整的测试步骤和手动测试清单见 [docs/TESTING.md](docs/TESTING.md)，测试数据用 [tests/fixtures/sensitive-sample.txt](tests/fixtures/sensitive-sample.txt)（全部为虚构数据）。
 
 ```sh
-# 识别规则与跟踪逻辑（任意平台）
+# 识别规则（任意平台）
 go test ./...
+
+# 逐帧追踪：合成滚动画面，逐帧检查是否遮住、遮挡是否贴合（任意平台）
+mkdir -p build && cc -O2 -I mac tests/motion_test.c mac/ARMotion.c -lm -o build/motion-test && build/motion-test
 
 # 原生部分：坐标换算、打码渲染，以及用 Vision 真实识别合成图片（macOS）
 mkdir -p build && go build -buildmode=c-archive -o build/libredact.a .
-clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) build/libredact.a \
+clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m) mac/ARMotion.c build/libredact.a \
   -framework Cocoa -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreVideo \
   -framework CoreImage -framework Vision -framework CoreFoundation -o build/mac-test && build/mac-test
 ```
@@ -55,7 +58,7 @@ clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m)
 | 路径 | 作用 |
 |---|---|
 | `internal/detect/` | 敏感信息识别规则（校验位、Luhn、OCR 纠错），返回 UTF-16 范围 |
-| `internal/track/` | 根据定期识别结果计算每一帧的打码区域：按内容指纹配对前后两次结果、估算滚动量、覆盖移动范围、保留时间、实时模式的位置预测 |
+| `mac/ARMotion.c` | 逐帧追踪（纯 C）：比对相邻画面估算每个打码框的位移（亚像素），新识别结果往回、往前追踪，处理滚入滚出画面、识别漏掉 |
 | `bridge.go` | 编译为静态库供 App 调用的 C 接口 |
 | `mac/ARCapture.m` | ScreenCaptureKit 屏幕画面（排除本 App 的窗口） |
 | `mac/ARRecognizer.m` | Vision 文字识别 → 敏感信息位置 |
@@ -68,4 +71,5 @@ clang -fobjc-arc -I build -I mac tests/mac_test.m $(ls mac/*.m | grep -v main.m)
 
 - 识别依赖 OCR：字太小、背景复杂、艺术字可能识别不到。重要场合请先录一段检查。
 - 中文识别使用精确模式，速度较慢，建议识别频率选每秒 3 次。
-- 遮挡模式无法预知下一帧，新内容可能短暂露出；高度敏感的信息请在共享前关闭。
+- 遮挡模式无法预知从未识别过的新内容，可能短暂露出；高度敏感的信息请在共享前关闭。
+- 一直停在画面边缘、只露出半截的文字识别不到，也就无法遮住。
